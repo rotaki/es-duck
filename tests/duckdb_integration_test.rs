@@ -2,14 +2,26 @@ use std::process::Command;
 use std::fs;
 use duckdb::Connection;
 
-fn binary_path() -> String {
+fn load_duckdb_binary() -> String {
     let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
-    format!("target/{}/es-duck", profile)
+    format!("target/{}/load-duckdb", profile)
+}
+
+fn sort_duckdb_binary() -> String {
+    let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+    format!("target/{}/sort-duckdb", profile)
 }
 
 fn run_loader(format: &str, input: &str, db: &str, table: &str) -> std::process::Output {
-    Command::new(binary_path())
+    Command::new(load_duckdb_binary())
         .args(["--format", format, "--input", input, "--db", db, "--table", table])
+        .output()
+        .expect("Failed to execute command")
+}
+
+fn run_sorter(db: &str, output: &str, table: &str, memory_limit: &str) -> std::process::Output {
+    Command::new(sort_duckdb_binary())
+        .args(["--db", db, "--output", output, "--table", table, "--memory-limit", memory_limit])
         .output()
         .expect("Failed to execute command")
 }
@@ -139,7 +151,7 @@ fn test_default_table_name() {
     let _ = fs::remove_file(db_path);
 
     // Run without --table argument
-    let output = Command::new(binary_path())
+    let output = Command::new(load_duckdb_binary())
         .args(["--format", "kvbin", "--input", input_path, "--db", db_path])
         .output()
         .expect("Failed to execute command");
@@ -154,4 +166,94 @@ fn test_default_table_name() {
 
     // Clean up
     let _ = fs::remove_file(db_path);
+}
+
+#[test]
+fn test_external_sort() {
+    use rand::Rng;
+
+    let input_path = "/tmp/test_sort_input.dat";
+    let db_path = "/tmp/test_sort.duckdb";
+    let output_path = "/tmp/test_sort_output.parquet";
+    let table = "sort_test";
+
+    // Generate 100 random gensort records with random keys
+    let mut rng = rand::rng();
+    let mut records: Vec<[u8; 100]> = Vec::with_capacity(100);
+    for i in 0..100u8 {
+        let mut record = [0u8; 100];
+        // Random 10-byte key
+        rng.fill(&mut record[0..10]);
+        // Payload with record number for identification
+        record[10] = i;
+        for j in 11..100 {
+            record[j] = b'X';
+        }
+        records.push(record);
+    }
+
+    // Write records (in random order, not sorted)
+    let mut file_data = Vec::with_capacity(100 * 100);
+    for record in &records {
+        file_data.extend_from_slice(record);
+    }
+    fs::write(input_path, &file_data).expect("Failed to write test file");
+
+    // Clean up any existing files
+    let _ = fs::remove_file(db_path);
+    let _ = fs::remove_file(output_path);
+
+    // Load data into DuckDB
+    let output = run_loader("gensort", input_path, db_path, table);
+    assert!(
+        output.status.success(),
+        "Loader failed: stdout: {}, stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Run external sort
+    let output = run_sorter(db_path, output_path, table, "128MB");
+    assert!(
+        output.status.success(),
+        "Sorter failed: stdout: {}, stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Verify output is sorted by reading from DuckDB via parquet
+    let conn = Connection::open_in_memory().expect("Failed to open in-memory database");
+    let query = format!("SELECT sort_key, payload FROM read_parquet('{}')", output_path);
+    let mut stmt = conn.prepare(&query).unwrap();
+    let rows: Vec<(Vec<u8>, Vec<u8>)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(rows.len(), 100, "Expected 100 rows in output");
+
+    // Verify the output is sorted by comparing adjacent keys
+    for i in 1..rows.len() {
+        let prev_key = &rows[i - 1].0;
+        let curr_key = &rows[i].0;
+        assert!(
+            prev_key <= curr_key,
+            "Output not sorted at index {}: {:?} > {:?}",
+            i,
+            prev_key,
+            curr_key
+        );
+    }
+
+    // Verify first key is smallest and last key is largest
+    let min_key = rows.iter().map(|(k, _)| k).min().unwrap();
+    let max_key = rows.iter().map(|(k, _)| k).max().unwrap();
+    assert_eq!(&rows[0].0, min_key, "First row should have smallest key");
+    assert_eq!(&rows[99].0, max_key, "Last row should have largest key");
+
+    // Clean up
+    let _ = fs::remove_file(input_path);
+    let _ = fs::remove_file(db_path);
+    let _ = fs::remove_file(output_path);
 }

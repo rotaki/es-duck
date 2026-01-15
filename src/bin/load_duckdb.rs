@@ -12,7 +12,7 @@ enum InputFormat {
 }
 
 #[derive(Parser)]
-#[command(name = "duckdb_load")]
+#[command(name = "es-duck-duckdb")]
 struct Args {
     #[arg(long, value_enum)]
     format: InputFormat,
@@ -38,7 +38,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // 1. Initialize DuckDB connection
     let conn = Connection::open(&args.db)?;
-    
+
     // 2. Prepare the schema
     conn.execute(
         &format!("CREATE TABLE IF NOT EXISTS {} (sort_key BLOB, payload BLOB);", args.table),
