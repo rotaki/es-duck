@@ -20,5 +20,9 @@ path = "src/bin/load_postgres.rs"
 name = "sort-duckdb"
 path = "src/bin/sort_duckdb.rs"
 
+[[bin]]
+name = "sort-postgres"
+path = "src/bin/sort_postgres.rs"
+
 [dev-dependencies]
 rand = "0.9"
