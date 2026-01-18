@@ -6,13 +6,12 @@ set -e
 # Configuration
 INPUT_FILE="${INPUT_FILE:-testdata/test_gensort.dat}"
 FORMAT="${FORMAT:-gensort}"
-DB_FILE="${DB_FILE:-/tmp/duckdb_bench.db}"
+DB_FILE="${DB_FILE:-./duckdb_bench.db}"
 TABLE="${TABLE:-bench_data}"
 OUTPUT_BASE="${OUTPUT_BASE:-./duckdb_sorted/result}"
 MEMORY_LIMIT="${MEMORY_LIMIT:-2GB}"
-TEMP_DIR="${TEMP_DIR:-/tmp/duckdb_temp}"
+TEMP_DIR="${TEMP_DIR:-./duckdb_temp}"
 THREAD_COUNTS="${THREAD_COUNTS:-4 8 16 24 32 40 44}"
-RESULTS_FILE="${RESULTS_FILE:-duckdb_parallelism_sweep_results.csv}"
 LOG_DIR="${LOG_DIR:-./logs/duckdb_parallelism_sweep}"
 
 echo "=== DuckDB Parallelism Sweep ==="
@@ -22,15 +21,11 @@ echo "Database: $DB_FILE"
 echo "Table: $TABLE"
 echo "Memory limit: $MEMORY_LIMIT"
 echo "Thread counts: $THREAD_COUNTS"
-echo "Results file: $RESULTS_FILE"
 echo "Log directory: $LOG_DIR"
 echo ""
 
 # Create log directory
 mkdir -p "$LOG_DIR"
-
-# Initialize results file with header
-echo "memory_limit,threads,duration_seconds" > "$RESULTS_FILE"
 
 # Create output and temp directories
 mkdir -p "$(dirname "$OUTPUT_BASE")"
@@ -44,7 +39,8 @@ if [ ! -f "$DB_FILE" ]; then
         --format "$FORMAT" \
         --input "$INPUT_FILE" \
         --db "$DB_FILE" \
-        --table "$TABLE"
+        --table "$TABLE" \
+        --threads 14
 
     echo "Flushing database to disk..."
     sync
@@ -121,9 +117,8 @@ for T in $THREAD_COUNTS; do
         echo "========================================="
     } > "$LOG_FILE"
 
-    # Log results to CSV
+    # Report results
     if [ -n "$DURATION" ]; then
-        echo "$MEMORY_LIMIT,$T,$DURATION" >> "$RESULTS_FILE"
         echo "Result logged: memory_limit=$MEMORY_LIMIT, threads=$T, duration=${DURATION}s"
     else
         echo "Warning: Could not extract timing information"
@@ -144,5 +139,4 @@ done
 
 echo "=== Sweep Complete ==="
 echo "All output directories have been cleaned up to save SSD space."
-echo "Timing results saved to: $RESULTS_FILE"
-echo "Detailed logs saved to: $LOG_DIR"
+echo "Results saved to logs in: $LOG_DIR"

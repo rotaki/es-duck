@@ -11,7 +11,6 @@ TABLE="${TABLE:-bench_data}"
 OUTPUT_BASE="${OUTPUT_BASE:-./postgres_sorted/result}"
 WORK_MEM="${WORK_MEM:-2GB}"
 WORKER_COUNTS="${WORKER_COUNTS:-4 8 16 24 32 40 44}"
-RESULTS_FILE="${RESULTS_FILE:-postgres_parallelism_sweep_results.csv}"
 LOG_DIR="${LOG_DIR:-./logs/postgres_parallelism_sweep}"
 
 echo "=== PostgreSQL Parallelism Sweep ==="
@@ -21,15 +20,11 @@ echo "Database: $DB_CONNECTION"
 echo "Table: $TABLE"
 echo "work_mem: $WORK_MEM"
 echo "Worker counts: $WORKER_COUNTS"
-echo "Results file: $RESULTS_FILE"
 echo "Log directory: $LOG_DIR"
 echo ""
 
 # Create log directory
 mkdir -p "$LOG_DIR"
-
-# Initialize results file with header
-echo "work_mem,parallel_workers,duration_seconds" > "$RESULTS_FILE"
 
 # Create output directory
 mkdir -p "$(dirname "$OUTPUT_BASE")"
@@ -57,7 +52,8 @@ if [ "$TABLE_EXISTS" = "f" ]; then
         --format "$FORMAT" \
         --input "$INPUT_FILE" \
         --db "$DB_CONNECTION" \
-        --table "$TABLE"
+        --table "$TABLE" \
+        --threads 14
 
     echo "Running CHECKPOINT..."
     psql "$DB_CONNECTION" -c "CHECKPOINT" >/dev/null
@@ -139,9 +135,8 @@ for W in $WORKER_COUNTS; do
         echo "========================================="
     } > "$LOG_FILE"
 
-    # Log results to CSV
+    # Report results
     if [ -n "$DURATION" ]; then
-        echo "$WORK_MEM,$W,$DURATION" >> "$RESULTS_FILE"
         echo "Result logged: work_mem=$WORK_MEM, parallel_workers=$W, duration=${DURATION}s"
     else
         echo "Warning: Could not extract timing information"
@@ -161,5 +156,4 @@ done
 
 echo "=== Sweep Complete ==="
 echo "All output files have been cleaned up to save SSD space."
-echo "Timing results saved to: $RESULTS_FILE"
-echo "Detailed logs saved to: $LOG_DIR"
+echo "Results saved to logs in: $LOG_DIR"

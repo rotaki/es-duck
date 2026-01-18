@@ -12,7 +12,6 @@ OUTPUT_BASE="${OUTPUT_BASE:-./postgres_sorted/result}"
 PARALLEL_WORKERS="${PARALLEL_WORKERS:-40}"
 # MEMORY_LIMITS="${MEMORY_LIMITS:-1GB 4GB 6GB 8GB 16GB 24GB 32GB}"
 MEMORY_LIMITS="${MEMORY_LIMITS:-2GB}"
-RESULTS_FILE="${RESULTS_FILE:-postgres_memory_sweep_results.csv}"
 LOG_DIR="${LOG_DIR:-./logs/postgres_memory_sweep}"
 
 echo "=== PostgreSQL Memory Sweep ==="
@@ -22,15 +21,11 @@ echo "Database: $DB_CONNECTION"
 echo "Table: $TABLE"
 echo "Parallel workers: $PARALLEL_WORKERS"
 echo "Memory limits: $MEMORY_LIMITS"
-echo "Results file: $RESULTS_FILE"
 echo "Log directory: $LOG_DIR"
 echo ""
 
 # Create log directory
 mkdir -p "$LOG_DIR"
-
-# Initialize results file with header
-echo "work_mem,parallel_workers,duration_seconds" > "$RESULTS_FILE"
 
 # Create output directory
 mkdir -p "$(dirname "$OUTPUT_BASE")"
@@ -58,7 +53,8 @@ if [ "$TABLE_EXISTS" = "f" ]; then
         --format "$FORMAT" \
         --input "$INPUT_FILE" \
         --db "$DB_CONNECTION" \
-        --table "$TABLE"
+        --table "$TABLE" \
+        --threads 14
 
     echo "Running CHECKPOINT..."
     psql "$DB_CONNECTION" -c "CHECKPOINT" >/dev/null
@@ -140,9 +136,8 @@ for MEM in $MEMORY_LIMITS; do
         echo "========================================="
     } > "$LOG_FILE"
 
-    # Log results to CSV
+    # Report results
     if [ -n "$DURATION" ]; then
-        echo "$MEM,$PARALLEL_WORKERS,$DURATION" >> "$RESULTS_FILE"
         echo "Result logged: work_mem=$MEM, parallel_workers=$PARALLEL_WORKERS, duration=${DURATION}s"
     else
         echo "Warning: Could not extract timing information"
@@ -162,5 +157,4 @@ done
 
 echo "=== Sweep Complete ==="
 echo "All output files have been cleaned up to save SSD space."
-echo "Timing results saved to: $RESULTS_FILE"
-echo "Detailed logs saved to: $LOG_DIR"
+echo "Results saved to logs in: $LOG_DIR"

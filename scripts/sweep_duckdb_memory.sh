@@ -13,7 +13,6 @@ THREADS="${THREADS:-40}"
 TEMP_DIR="${TEMP_DIR:-./duckdb_temp}"
 # MEMORY_LIMITS="${MEMORY_LIMITS:-2GB 4GB 6GB 8GB 16GB 24GB 32GB}"
 MEMORY_LIMITS="${MEMORY_LIMITS:-2GB}"
-RESULTS_FILE="${RESULTS_FILE:-duckdb_memory_sweep_results.csv}"
 LOG_DIR="${LOG_DIR:-./logs/duckdb_memory_sweep}"
 
 echo "=== DuckDB Memory Sweep ==="
@@ -23,15 +22,11 @@ echo "Database: $DB_FILE"
 echo "Table: $TABLE"
 echo "Threads: $THREADS"
 echo "Memory limits: $MEMORY_LIMITS"
-echo "Results file: $RESULTS_FILE"
 echo "Log directory: $LOG_DIR"
 echo ""
 
 # Create log directory
 mkdir -p "$LOG_DIR"
-
-# Initialize results file with header
-echo "memory_limit,threads,duration_seconds" > "$RESULTS_FILE"
 
 # Create output and temp directories
 mkdir -p "$(dirname "$OUTPUT_BASE")"
@@ -45,7 +40,8 @@ if [ ! -f "$DB_FILE" ]; then
         --format "$FORMAT" \
         --input "$INPUT_FILE" \
         --db "$DB_FILE" \
-        --table "$TABLE"
+        --table "$TABLE" \
+        --threads "$THREADS"
 
     echo "Flushing database to disk..."
     sync
@@ -122,9 +118,8 @@ for MEM in $MEMORY_LIMITS; do
         echo "========================================="
     } > "$LOG_FILE"
 
-    # Log results to CSV
+    # Report results
     if [ -n "$DURATION" ]; then
-        echo "$MEM,$THREADS,$DURATION" >> "$RESULTS_FILE"
         echo "Result logged: memory_limit=$MEM, threads=$THREADS, duration=${DURATION}s"
     else
         echo "Warning: Could not extract timing information"
@@ -145,5 +140,4 @@ done
 
 echo "=== Sweep Complete ==="
 echo "All output directories have been cleaned up to save SSD space."
-echo "Timing results saved to: $RESULTS_FILE"
-echo "Detailed logs saved to: $LOG_DIR"
+echo "Results saved to logs in: $LOG_DIR"

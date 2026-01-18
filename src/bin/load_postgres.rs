@@ -4,8 +4,10 @@ use postgres::types::Type;
 use postgres::{Client, NoTls};
 use std::error::Error;
 use std::fs::File;
-use std::io::{self, BufReader, Read};
+use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum InputFormat {
@@ -28,9 +30,12 @@ struct Args {
 
     #[arg(long, default_value = "bench_data")]
     table: String,
+
+    #[arg(long, default_value_t = 1)]
+    threads: usize,
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let args = Args::parse();
 
     let mut client = Client::connect(&args.db, NoTls)?;
@@ -40,32 +45,45 @@ fn main() -> Result<(), Box<dyn Error>> {
         args.table
     ))?;
 
+    drop(client);
+
+    println!(
+        "Starting load from {:?} with {} threads...",
+        args.input, args.threads
+    );
+
     let rows = match args.format {
-        InputFormat::Gensort => load_gensort(&args.input, &mut client, &args.table)?,
-        InputFormat::Kvbin => load_kvbin(&args.input, &mut client, &args.table)?,
+        InputFormat::Gensort => load_gensort(&args.input, &args.db, &args.table, args.threads)?,
+        InputFormat::Kvbin => {
+            let mut client = Client::connect(&args.db, NoTls)?;
+            load_kvbin(&args.input, &mut client, &args.table)?
+        }
     };
 
+    println!("Successfully loaded {} rows", rows);
     Ok(())
 }
 
-fn load_gensort(
+fn load_gensort_chunk(
     input: &PathBuf,
-    client: &mut Client,
+    db_conn_str: &str,
     table: &str,
-) -> Result<u64, Box<dyn std::error::Error>> {
+    start_record: u64,
+    end_record: u64,
+) -> Result<u64, Box<dyn Error + Send + Sync>> {
     const KEY_SIZE: usize = 10;
     const PAYLOAD_SIZE: usize = 90;
     const RECORD_SIZE: usize = KEY_SIZE + PAYLOAD_SIZE;
 
-    let file = File::open(input)?;
-    let file_size = file.metadata()?.len();
-    let num_records = file_size / RECORD_SIZE as u64;
+    let mut file = File::open(input)?;
+    file.seek(SeekFrom::Start(start_record * RECORD_SIZE as u64))?;
 
     let mut reader = BufReader::with_capacity(8 * 1024 * 1024, file);
-    let mut buf = [0u8; RECORD_SIZE];
+    let mut buf = vec![0u8; RECORD_SIZE];
+    let num_records = end_record - start_record;
 
+    let mut client = Client::connect(db_conn_str, NoTls)?;
     let mut tx = client.transaction()?;
-    // Nice for bulk load benchmarks; remove if you care about durability of each commit.
     tx.batch_execute("SET LOCAL synchronous_commit = off;")?;
 
     let copy_stmt = format!("COPY {} (sort_key, payload) FROM STDIN BINARY", table);
@@ -79,10 +97,75 @@ fn load_gensort(
         writer.write(&[&key, &payload])?;
     }
 
-    let inserted = writer.finish()?; // rows inserted
+    let inserted = writer.finish()?;
     tx.commit()?;
-    println!("Inserted {} rows into {}", inserted, table);
     Ok(inserted)
+}
+
+fn load_gensort(
+    input: &PathBuf,
+    db_conn_str: &str,
+    table: &str,
+    num_threads: usize,
+) -> Result<u64, Box<dyn Error + Send + Sync>> {
+    const KEY_SIZE: usize = 10;
+    const PAYLOAD_SIZE: usize = 90;
+    const RECORD_SIZE: usize = KEY_SIZE + PAYLOAD_SIZE;
+
+    let file = File::open(input)?;
+    let file_size = file.metadata()?.len();
+    let total_records = file_size / RECORD_SIZE as u64;
+    drop(file);
+
+    if num_threads == 1 {
+        // Single-threaded path
+        return load_gensort_chunk(input, db_conn_str, table, 0, total_records);
+    }
+
+    // Multi-threaded path
+    let records_per_thread = (total_records + num_threads as u64 - 1) / num_threads as u64;
+    let total_rows = Arc::new(Mutex::new(0u64));
+    let mut handles = vec![];
+
+    for thread_id in 0..num_threads {
+        let start_record = thread_id as u64 * records_per_thread;
+        let end_record = ((thread_id + 1) as u64 * records_per_thread).min(total_records);
+
+        if start_record >= total_records {
+            break;
+        }
+
+        let input = input.clone();
+        let db_conn_str = db_conn_str.to_string();
+        let table = table.to_string();
+        let total_rows = Arc::clone(&total_rows);
+
+        let handle = thread::spawn(move || -> Result<u64, Box<dyn Error + Send + Sync>> {
+            let rows = load_gensort_chunk(&input, &db_conn_str, &table, start_record, end_record)?;
+
+            let mut total = total_rows.lock().unwrap();
+            *total += rows;
+
+            Ok(rows)
+        });
+
+        handles.push(handle);
+    }
+
+    // Wait for all threads to complete
+    for (i, handle) in handles.into_iter().enumerate() {
+        match handle.join() {
+            Ok(result) => match result {
+                Ok(rows) => println!("Thread {} loaded {} rows", i, rows),
+                Err(e) => return Err(format!("Thread {} failed: {}", i, e).into()),
+            },
+            Err(_) => return Err(format!("Thread {} panicked", i).into()),
+        }
+    }
+
+    let total = *total_rows.lock().unwrap();
+    println!("Inserted {} total rows into {}", total, table);
+    Ok(total)
 }
 
 fn load_kvbin(
