@@ -1,5 +1,5 @@
 use clap::{Parser, ValueEnum};
-use duckdb::{params, Appender, Connection};
+use duckdb::{Appender, Connection, params};
 use std::error::Error;
 use std::fs::File;
 use std::io::{self, BufReader, Read};
@@ -41,7 +41,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // 2. Prepare the schema
     conn.execute(
-        &format!("CREATE TABLE IF NOT EXISTS {} (sort_key BLOB, payload BLOB);", args.table),
+        &format!(
+            "CREATE TABLE IF NOT EXISTS {} (sort_key BLOB, payload BLOB);",
+            args.table
+        ),
         [],
     )?;
 
@@ -92,7 +95,9 @@ fn load_kvbin(input: &PathBuf, appender: &mut Appender) -> Result<u64, Box<dyn E
     loop {
         let mut len_buf = [0u8; 4];
         if let Err(e) = reader.read_exact(&mut len_buf) {
-            if e.kind() == io::ErrorKind::UnexpectedEof { break; }
+            if e.kind() == io::ErrorKind::UnexpectedEof {
+                break;
+            }
             return Err(e.into());
         }
         let klen = u32::from_le_bytes(len_buf) as usize;

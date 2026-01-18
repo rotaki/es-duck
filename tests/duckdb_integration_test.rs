@@ -1,27 +1,46 @@
-use std::process::Command;
-use std::fs;
 use duckdb::Connection;
+use std::fs;
+use std::process::Command;
 
 fn load_duckdb_binary() -> String {
-    let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
     format!("target/{}/load-duckdb", profile)
 }
 
 fn sort_duckdb_binary() -> String {
-    let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
     format!("target/{}/sort-duckdb", profile)
 }
 
 fn run_loader(format: &str, input: &str, db: &str, table: &str) -> std::process::Output {
     Command::new(load_duckdb_binary())
-        .args(["--format", format, "--input", input, "--db", db, "--table", table])
+        .args([
+            "--format", format, "--input", input, "--db", db, "--table", table,
+        ])
         .output()
         .expect("Failed to execute command")
 }
 
 fn run_sorter(db: &str, output: &str, table: &str, memory_limit: &str) -> std::process::Output {
     Command::new(sort_duckdb_binary())
-        .args(["--db", db, "--output", output, "--table", table, "--memory-limit", memory_limit])
+        .args([
+            "--db",
+            db,
+            "--output",
+            output,
+            "--table",
+            table,
+            "--memory-limit",
+            memory_limit,
+        ])
         .output()
         .expect("Failed to execute command")
 }
@@ -37,11 +56,17 @@ fn test_gensort_format() {
 
     // Run the loader
     let output = run_loader("gensort", input_path, db_path, table);
-    assert!(output.status.success(), "Loader failed: {:?}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "Loader failed: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Verify the data
     let conn = Connection::open(db_path).expect("Failed to open database");
-    let mut stmt = conn.prepare(&format!("SELECT sort_key, payload FROM {}", table)).unwrap();
+    let mut stmt = conn
+        .prepare(&format!("SELECT sort_key, payload FROM {}", table))
+        .unwrap();
     let rows: Vec<(Vec<u8>, Vec<u8>)> = stmt
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
         .unwrap()
@@ -78,11 +103,17 @@ fn test_kvbin_format() {
 
     // Run the loader
     let output = run_loader("kvbin", input_path, db_path, table);
-    assert!(output.status.success(), "Loader failed: {:?}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "Loader failed: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Verify the data
     let conn = Connection::open(db_path).expect("Failed to open database");
-    let mut stmt = conn.prepare(&format!("SELECT sort_key, payload FROM {}", table)).unwrap();
+    let mut stmt = conn
+        .prepare(&format!("SELECT sort_key, payload FROM {}", table))
+        .unwrap();
     let rows: Vec<(Vec<u8>, Vec<u8>)> = stmt
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
         .unwrap()
@@ -125,11 +156,17 @@ fn test_binary_data_preserved() {
 
     // Run the loader
     let output = run_loader("gensort", input_path, db_path, table);
-    assert!(output.status.success(), "Loader failed: {:?}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "Loader failed: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Verify the binary data was preserved exactly
     let conn = Connection::open(db_path).expect("Failed to open database");
-    let mut stmt = conn.prepare(&format!("SELECT sort_key, payload FROM {}", table)).unwrap();
+    let mut stmt = conn
+        .prepare(&format!("SELECT sort_key, payload FROM {}", table))
+        .unwrap();
     let (key, payload): (Vec<u8>, Vec<u8>) = stmt
         .query_row([], |row| Ok((row.get(0)?, row.get(1)?)))
         .unwrap();
@@ -155,7 +192,11 @@ fn test_default_table_name() {
         .args(["--format", "kvbin", "--input", input_path, "--db", db_path])
         .output()
         .expect("Failed to execute command");
-    assert!(output.status.success(), "Loader failed: {:?}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "Loader failed: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Verify the default table name was used
     let conn = Connection::open(db_path).expect("Failed to open database");
@@ -223,7 +264,10 @@ fn test_external_sort() {
 
     // Verify output is sorted by reading from DuckDB via parquet
     let conn = Connection::open_in_memory().expect("Failed to open in-memory database");
-    let query = format!("SELECT sort_key, payload FROM read_parquet('{}')", output_path);
+    let query = format!(
+        "SELECT sort_key, payload FROM read_parquet('{}')",
+        output_path
+    );
     let mut stmt = conn.prepare(&query).unwrap();
     let rows: Vec<(Vec<u8>, Vec<u8>)> = stmt
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))

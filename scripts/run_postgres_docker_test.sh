@@ -5,7 +5,7 @@ set -euo pipefail
 # suitable for running the postgres_integration_test.
 #
 # Usage:
-#   ./scripts/run_postgres_test.sh
+#   ./scripts/run_postgres_docker_test.sh
 # Then, in another terminal:
 #   export POSTGRES_TEST_URL=postgres://postgres:postgres@localhost:5432/es_duck_test
 #   cargo test --test postgres_integration_test
@@ -25,12 +25,14 @@ fi
 
 echo "Starting Postgres Docker container '${CONTAINER_NAME}' on port ${POSTGRES_PORT}..."
 
+# Mount /tmp so PostgreSQL can write test output files that are accessible from the host
 docker run --rm -d \
   --name "${CONTAINER_NAME}" \
   -e POSTGRES_PASSWORD="${POSTGRES_PASSWORD}" \
   -e POSTGRES_DB="${POSTGRES_DB}" \
   -p "${POSTGRES_PORT}:5432" \
-  postgres:16
+  -v /tmp:/tmp \
+  postgres:18
 
 POSTGRES_TEST_URL="postgres://postgres:${POSTGRES_PASSWORD}@localhost:${POSTGRES_PORT}/${POSTGRES_DB}"
 

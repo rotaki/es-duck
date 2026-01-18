@@ -1,1 +1,7 @@
 /target
+
+# Local PostgreSQL installation
+/scripts/postgres/
+/scripts/postgres-data/
+/scripts/postgres.log
+/testdata/test_gensort_*

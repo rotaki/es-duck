@@ -1,30 +1,59 @@
-use std::process::Command;
 use postgres::{Client, NoTls};
+use std::process::Command;
 
 fn postgres_url() -> Option<String> {
     std::env::var("POSTGRES_TEST_URL").ok()
 }
 
 fn load_postgres_binary() -> String {
-    let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
     format!("target/{}/load-postgres", profile)
 }
 
 fn sort_postgres_binary() -> String {
-    let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
     format!("target/{}/sort-postgres", profile)
 }
 
-fn run_postgres_loader(format: &str, input: &str, db_url: &str, table: &str) -> std::process::Output {
+fn run_postgres_loader(
+    format: &str,
+    input: &str,
+    db_url: &str,
+    table: &str,
+) -> std::process::Output {
     Command::new(load_postgres_binary())
-        .args(["--format", format, "--input", input, "--db", db_url, "--table", table])
+        .args([
+            "--format", format, "--input", input, "--db", db_url, "--table", table,
+        ])
         .output()
         .expect("Failed to execute load-postgres")
 }
 
-fn run_postgres_sorter(db_url: &str, output: &str, table: &str, work_mem: &str) -> std::process::Output {
+fn run_postgres_sorter(
+    db_url: &str,
+    output: &str,
+    table: &str,
+    work_mem: &str,
+) -> std::process::Output {
     Command::new(sort_postgres_binary())
-        .args(["--db", db_url, "--output", output, "--table", table, "--work-mem", work_mem])
+        .args([
+            "--db",
+            db_url,
+            "--output",
+            output,
+            "--table",
+            table,
+            "--total-memory",
+            work_mem,
+        ])
         .output()
         .expect("Failed to execute sort-postgres")
 }
@@ -192,7 +221,16 @@ fn test_postgres_external_sort() {
     );
 
     // Read and parse the PostgreSQL binary COPY format output
-    let sorted_keys = parse_postgres_binary_copy(output_path).expect("Failed to parse binary copy output");
+    if !std::path::Path::new(output_path).exists() {
+        panic!(
+            "Output file does not exist: {}\n\
+             If using Docker, ensure /tmp is mounted: -v /tmp:/tmp\n\
+             If using local PostgreSQL, ensure the PostgreSQL user has write access to /tmp",
+            output_path
+        );
+    }
+    let sorted_keys =
+        parse_postgres_binary_copy(output_path).expect("Failed to parse binary copy output");
 
     assert_eq!(sorted_keys.len(), 100, "Expected 100 rows in output");
 
@@ -212,8 +250,14 @@ fn test_postgres_external_sort() {
     // Verify first key is smallest and last key is largest
     let min_key = sorted_keys.iter().min().unwrap();
     let max_key = sorted_keys.iter().max().unwrap();
-    assert_eq!(&sorted_keys[0], min_key, "First row should have smallest key");
-    assert_eq!(&sorted_keys[99], max_key, "Last row should have largest key");
+    assert_eq!(
+        &sorted_keys[0], min_key,
+        "First row should have smallest key"
+    );
+    assert_eq!(
+        &sorted_keys[99], max_key,
+        "Last row should have largest key"
+    );
 
     // Clean up
     let _ = fs::remove_file(input_path);
@@ -225,8 +269,9 @@ fn test_postgres_external_sort() {
 }
 
 /// Parse PostgreSQL binary COPY format and extract sort_key values
-fn parse_postgres_binary_copy(path: &str) -> io::Result<Vec<Vec<u8>>> {
+fn parse_postgres_binary_copy(path: &str) -> std::io::Result<Vec<Vec<u8>>> {
     use std::fs::File;
+    use std::io::Read;
 
     let mut file = File::open(path)?;
     let mut data = Vec::new();
@@ -238,13 +283,19 @@ fn parse_postgres_binary_copy(path: &str) -> io::Result<Vec<Vec<u8>>> {
     // Binary COPY header: "PGCOPY\n\xff\r\n\0" (11 bytes) + flags (4 bytes) + header extension (4 bytes)
     // Total header: 19 bytes minimum
     if data.len() < 19 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "File too short for binary COPY header"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "File too short for binary COPY header",
+        ));
     }
 
     // Verify signature "PGCOPY\n\xff\r\n\0"
     let signature = b"PGCOPY\n\xff\r\n\0";
     if &data[0..11] != signature {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid PGCOPY signature"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Invalid PGCOPY signature",
+        ));
     }
     pos = 11;
 
@@ -252,7 +303,8 @@ fn parse_postgres_binary_copy(path: &str) -> io::Result<Vec<Vec<u8>>> {
     pos += 4;
 
     // Read header extension length (4 bytes, big-endian)
-    let ext_len = i32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+    let ext_len =
+        i32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
     pos += 4;
 
     // Skip header extension
@@ -275,11 +327,15 @@ fn parse_postgres_binary_copy(path: &str) -> io::Result<Vec<Vec<u8>>> {
         // Read each field
         for field_idx in 0..field_count {
             if pos + 4 > data.len() {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "Unexpected end of data"));
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Unexpected end of data",
+                ));
             }
 
             // Field length (4 bytes, big-endian) - -1 indicates NULL
-            let field_len = i32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+            let field_len =
+                i32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
             pos += 4;
 
             if field_len == -1 {
@@ -289,7 +345,10 @@ fn parse_postgres_binary_copy(path: &str) -> io::Result<Vec<Vec<u8>>> {
 
             let field_len = field_len as usize;
             if pos + field_len > data.len() {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "Field length exceeds data"));
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Field length exceeds data",
+                ));
             }
 
             // First field is sort_key
@@ -303,4 +362,3 @@ fn parse_postgres_binary_copy(path: &str) -> io::Result<Vec<Vec<u8>>> {
 
     Ok(keys)
 }
-
