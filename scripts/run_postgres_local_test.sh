@@ -150,7 +150,9 @@ if pg_isready -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" >/dev/null 2>&1; then
   echo "PostgreSQL is already running on ${POSTGRES_HOST}:${POSTGRES_PORT}"
 else
   echo "Starting PostgreSQL server on port ${POSTGRES_PORT}..."
-  pg_ctl -D "${POSTGRES_DATA_DIR}" -l "${POSTGRES_LOG}" -o "-p ${POSTGRES_PORT} -k ${SCRIPT_DIR}" start
+  pg_ctl -D "${POSTGRES_DATA_DIR}" -l "${POSTGRES_LOG}" \
+    -o "-p ${POSTGRES_PORT} -k ${SCRIPT_DIR} -c max_worker_processes=128 -c max_parallel_workers=128 -c max_connections=200" \
+    start
 
   # Wait for PostgreSQL to be ready
   echo "Waiting for PostgreSQL to be ready..."
