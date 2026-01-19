@@ -273,8 +273,10 @@ fn load_kvbin_parallel(
     table: &str,
     num_threads: usize,
 ) -> Result<u64, Box<dyn Error + Send + Sync>> {
-    // Check for index file
-    let index_path = input.with_extension("idx");
+    // Check for index file (original filename + .idx)
+    let mut index_path = input.as_os_str().to_owned();
+    index_path.push(".idx");
+    let index_path = PathBuf::from(index_path);
     let file_size = File::open(input)?.metadata()?.len();
 
     if index_path.exists() && num_threads > 1 {
