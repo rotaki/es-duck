@@ -3,7 +3,7 @@ use duckdb::{Connection, params};
 use std::error::Error;
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{SyncSender, sync_channel};
 use std::thread;
 
@@ -187,19 +187,55 @@ fn send_gensort_chunk(
     Ok(num_records)
 }
 
-fn load_kvbin_parallel(
-    input: &PathBuf,
-    db: &PathBuf,
-    table: &str,
-    _num_threads: usize,
-) -> Result<u64, Box<dyn Error + Send + Sync>> {
-    // Read all records into memory (kvbin is variable-length, can't seek)
-    let file = File::open(input)?;
-    let mut reader = BufReader::with_capacity(8 * 1024 * 1024, file);
-    let mut records: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+fn load_index(index_file: impl AsRef<Path>, file_size: u64) -> Result<Vec<u64>, String> {
+    let mut index_points = vec![0];
 
-    loop {
-        let mut len_buf = [0u8; 4];
+    let mut index_file =
+        File::open(index_file).map_err(|e| format!("Failed to open index file: {e}"))?;
+    let size = index_file
+        .metadata()
+        .map_err(|e| format!("Failed to get index file metadata: {e}"))?
+        .len();
+
+    let mut buf = Vec::with_capacity(size as usize);
+    unsafe {
+        buf.set_len(size as usize);
+    }
+    index_file
+        .read_exact(&mut buf)
+        .map_err(|e| format!("Failed to read index file: {e}"))?;
+
+    index_points.extend(
+        buf.chunks_exact(8)
+            .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+            .filter(|&off| off > 0 && off < file_size),
+    );
+
+    index_points.push(file_size);
+    index_points.sort_unstable();
+    index_points.dedup();
+    Ok(index_points)
+}
+
+fn send_kvbin_chunk_indexed(
+    input: &PathBuf,
+    start_offset: u64,
+    end_offset: u64,
+    tx: SyncSender<(Vec<u8>, Vec<u8>)>,
+) -> Result<u64, Box<dyn Error + Send + Sync>> {
+    let mut file = File::open(input)?;
+    file.seek(SeekFrom::Start(start_offset))?;
+    let mut reader = BufReader::with_capacity(4 * 1024 * 1024, file);
+
+    let mut rows = 0u64;
+    let mut len_buf = [0u8; 4];
+    let mut key_buf = Vec::new();
+    let mut val_buf = Vec::new();
+    let mut current_pos = start_offset;
+
+    // Read records until we reach end_offset
+    while current_pos < end_offset {
+        // Read key length
         if let Err(e) = reader.read_exact(&mut len_buf) {
             if e.kind() == io::ErrorKind::UnexpectedEof {
                 break;
@@ -207,27 +243,142 @@ fn load_kvbin_parallel(
             return Err(e.into());
         }
         let klen = u32::from_le_bytes(len_buf) as usize;
-        let mut key_bytes = vec![0u8; klen];
-        reader.read_exact(&mut key_bytes)?;
+        key_buf.resize(klen, 0);
+        reader.read_exact(&mut key_buf)?;
 
+        // Read value length
         reader.read_exact(&mut len_buf)?;
         let vlen = u32::from_le_bytes(len_buf) as usize;
-        let mut val_bytes = vec![0u8; vlen];
-        reader.read_exact(&mut val_bytes)?;
+        val_buf.resize(vlen, 0);
+        reader.read_exact(&mut val_buf)?;
 
-        records.push((key_bytes, val_bytes));
+        current_pos += 8 + klen as u64 + vlen as u64; // 4 bytes klen + 4 bytes vlen + data
+
+        tx.send((key_buf.clone(), val_buf.clone()))
+            .map_err(|_| "Failed to send record to channel")?;
+        rows += 1;
+
+        // Stop if we've crossed into the next partition
+        if current_pos >= end_offset {
+            break;
+        }
     }
 
-    let total_records = records.len();
-    drop(reader);
+    Ok(rows)
+}
 
-    // Sequential append with single connection
-    println!("Appending {} total rows to DuckDB...", total_records);
-    let conn = Connection::open(db)?;
-    let mut appender = conn.appender(table)?;
-    for (key, val) in &records {
-        appender.append_row(params![key.as_slice(), val.as_slice()])?;
+fn load_kvbin_parallel(
+    input: &PathBuf,
+    db: &PathBuf,
+    table: &str,
+    num_threads: usize,
+) -> Result<u64, Box<dyn Error + Send + Sync>> {
+    // Check for index file
+    let index_path = input.with_extension("idx");
+    let file_size = File::open(input)?.metadata()?.len();
+
+    if index_path.exists() && num_threads > 1 {
+        // Parallel loading using index
+        println!("Loading index from {:?}...", index_path);
+        let offsets = load_index(&index_path, file_size)
+            .map_err(|e| -> Box<dyn Error + Send + Sync> { e.into() })?;
+
+        println!(
+            "Index loaded: {} offset points, using {} threads",
+            offsets.len(),
+            num_threads
+        );
+
+        let (tx, rx) = sync_channel::<(Vec<u8>, Vec<u8>)>(100_000);
+
+        // Divide the file into N partitions based on offsets
+        let partitions_per_thread = (offsets.len() + num_threads - 1) / num_threads;
+        let mut handles = vec![];
+
+        for thread_id in 0..num_threads {
+            let start_partition = thread_id * partitions_per_thread;
+            let end_partition = ((thread_id + 1) * partitions_per_thread).min(offsets.len());
+
+            if start_partition >= offsets.len() - 1 {
+                break;
+            }
+
+            let start_offset = offsets[start_partition];
+            let end_offset = offsets[end_partition.min(offsets.len() - 1)];
+
+            let input = input.clone();
+            let tx = tx.clone();
+
+            let handle = thread::spawn(move || -> Result<u64, Box<dyn Error + Send + Sync>> {
+                send_kvbin_chunk_indexed(&input, start_offset, end_offset, tx)
+            });
+
+            handles.push(handle);
+        }
+
+        drop(tx);
+
+        // Main thread: append to DB
+        let conn = Connection::open(db)?;
+        let mut appender = conn.appender(table)?;
+        let mut total_rows = 0u64;
+
+        for (key, val) in rx {
+            appender.append_row(params![key.as_slice(), val.as_slice()])?;
+            total_rows += 1;
+        }
+
+        // Wait for all threads
+        for (i, handle) in handles.into_iter().enumerate() {
+            match handle.join() {
+                Ok(result) => match result {
+                    Ok(rows) => println!("Thread {} read {} rows", i, rows),
+                    Err(e) => return Err(format!("Thread {} failed: {}", i, e).into()),
+                },
+                Err(_) => return Err(format!("Thread {} panicked", i).into()),
+            }
+        }
+
+        Ok(total_rows)
+    } else {
+        // Sequential loading (no index or single thread)
+        if !index_path.exists() {
+            println!("No index file found, using sequential loading");
+        }
+
+        let file = File::open(input)?;
+        let mut reader = BufReader::with_capacity(32 * 1024 * 1024, file);
+
+        let conn = Connection::open(db)?;
+        let mut appender = conn.appender(table)?;
+
+        let mut rows = 0u64;
+        let mut len_buf = [0u8; 4];
+        let mut key_buf = Vec::new();
+        let mut val_buf = Vec::new();
+
+        loop {
+            // Read key length
+            if let Err(e) = reader.read_exact(&mut len_buf) {
+                if e.kind() == io::ErrorKind::UnexpectedEof {
+                    break;
+                }
+                return Err(e.into());
+            }
+            let klen = u32::from_le_bytes(len_buf) as usize;
+            key_buf.resize(klen, 0);
+            reader.read_exact(&mut key_buf)?;
+
+            // Read value length
+            reader.read_exact(&mut len_buf)?;
+            let vlen = u32::from_le_bytes(len_buf) as usize;
+            val_buf.resize(vlen, 0);
+            reader.read_exact(&mut val_buf)?;
+
+            appender.append_row(params![key_buf.as_slice(), val_buf.as_slice()])?;
+            rows += 1;
+        }
+
+        Ok(rows)
     }
-
-    Ok(total_records as u64)
 }
