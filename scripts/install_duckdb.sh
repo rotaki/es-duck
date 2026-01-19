@@ -6,7 +6,7 @@ set -euo pipefail
 #   ./scripts/install_duckdb.sh
 #
 # After installation, you can run DuckDB with:
-#   ./scripts/duckdb/duckdb [database_file]
+#   ./scripts/duckdb/duckdb-VERSION [database_file]
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DUCKDB_DIR="${SCRIPT_DIR}/duckdb"
@@ -18,15 +18,16 @@ echo
 # Create duckdb directory if it doesn't exist
 mkdir -p "${DUCKDB_DIR}"
 
-# Check if DuckDB is already installed
-if [[ -x "${DUCKDB_DIR}/duckdb" ]]; then
-  INSTALLED_VERSION=$("${DUCKDB_DIR}/duckdb" --version 2>&1 | head -1 | awk '{print $2}')
-  echo "DuckDB is already installed (version: ${INSTALLED_VERSION})"
-  echo "Location: ${DUCKDB_DIR}/duckdb"
+# Check if DuckDB version is already installed
+VERSIONED_BINARY="${DUCKDB_DIR}/duckdb-${DUCKDB_VERSION}"
+if [[ -x "${VERSIONED_BINARY}" ]]; then
+  INSTALLED_VERSION=$("${VERSIONED_BINARY}" --version 2>&1 | head -1 | awk '{print $2}')
+  echo "DuckDB ${DUCKDB_VERSION} is already installed"
+  echo "Location: ${VERSIONED_BINARY}"
   echo
-  echo "To reinstall, remove the directory first:"
-  echo "  rm -rf ${DUCKDB_DIR}"
-  echo "  ./scripts/install_duckdb.sh"
+  echo "To reinstall or install a different version:"
+  echo "  rm ${VERSIONED_BINARY}"
+  echo "  DUCKDB_VERSION=x.y.z ./scripts/install_duckdb.sh"
   exit 0
 fi
 
@@ -92,34 +93,39 @@ if ! curl -f -L -o "${TEMP_ZIP}" "${DOWNLOAD_URL}"; then
 fi
 
 echo "Extracting DuckDB CLI..."
-unzip -q -o "${TEMP_ZIP}" -d "${DUCKDB_DIR}"
+TEMP_EXTRACT_DIR="/tmp/duckdb_extract_$$"
+mkdir -p "${TEMP_EXTRACT_DIR}"
+unzip -q -o "${TEMP_ZIP}" -d "${TEMP_EXTRACT_DIR}"
 
-# Make executable
-chmod +x "${DUCKDB_DIR}/duckdb"
+# Rename binary to include version
+VERSIONED_BINARY="${DUCKDB_DIR}/duckdb-${DUCKDB_VERSION}"
+mv "${TEMP_EXTRACT_DIR}/duckdb" "${VERSIONED_BINARY}"
+chmod +x "${VERSIONED_BINARY}"
 
 # Cleanup
+rm -rf "${TEMP_EXTRACT_DIR}"
 rm -f "${TEMP_ZIP}"
 
 # Verify installation
-if [[ -x "${DUCKDB_DIR}/duckdb" ]]; then
-  INSTALLED_VERSION=$("${DUCKDB_DIR}/duckdb" --version 2>&1 | head -1)
+if [[ -x "${VERSIONED_BINARY}" ]]; then
+  INSTALLED_VERSION=$("${VERSIONED_BINARY}" --version 2>&1 | head -1)
   echo
   echo "Successfully installed DuckDB!"
   echo "Version: ${INSTALLED_VERSION}"
-  echo "Location: ${DUCKDB_DIR}/duckdb"
+  echo "Binary: ${VERSIONED_BINARY}"
   echo
   echo "Usage examples:"
   echo "  # Start DuckDB CLI"
-  echo "  ${DUCKDB_DIR}/duckdb"
+  echo "  ${VERSIONED_BINARY}"
   echo
   echo "  # Open a database file"
-  echo "  ${DUCKDB_DIR}/duckdb mydatabase.db"
+  echo "  ${VERSIONED_BINARY} mydatabase.db"
   echo
   echo "  # Execute a SQL file"
-  echo "  ${DUCKDB_DIR}/duckdb mydatabase.db < query.sql"
+  echo "  ${VERSIONED_BINARY} mydatabase.db < query.sql"
   echo
   echo "  # Run a single query"
-  echo "  ${DUCKDB_DIR}/duckdb mydatabase.db -c \"SELECT * FROM my_table LIMIT 10;\""
+  echo "  ${VERSIONED_BINARY} mydatabase.db -c \"SELECT * FROM my_table LIMIT 10;\""
   echo
 else
   echo "Error: Installation failed" >&2
