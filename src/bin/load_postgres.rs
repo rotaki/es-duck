@@ -4,7 +4,7 @@ use postgres::types::Type;
 use postgres::{Client, NoTls};
 use std::error::Error;
 use std::fs::File;
-use std::io::{self, BufReader, Read, Seek, SeekFrom};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -172,7 +172,7 @@ fn load_kvbin(
     input: &PathBuf,
     client: &mut Client,
     table: &str,
-) -> Result<u64, Box<dyn std::error::Error>> {
+) -> Result<u64, Box<dyn Error + Send + Sync>> {
     let file = File::open(input)?;
     let mut reader = BufReader::with_capacity(8 * 1024 * 1024, file);
 

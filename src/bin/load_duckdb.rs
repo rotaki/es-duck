@@ -1,10 +1,10 @@
 use clap::{Parser, ValueEnum};
-use duckdb::{Appender, Connection, params};
+use duckdb::{Connection, params};
 use std::error::Error;
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{SyncSender, sync_channel};
 use std::thread;
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -86,15 +86,29 @@ fn load_gensort_parallel(
     drop(file);
 
     if num_threads == 1 {
-        // Single-threaded path
+        // Single-threaded path: read and append directly
         let conn = Connection::open(db)?;
         let mut appender = conn.appender(table)?;
-        return load_gensort_chunk(input, 0, total_records, &mut appender);
+
+        let file = File::open(input)?;
+        let mut reader = BufReader::with_capacity(1024 * 1024, file);
+        let mut buf = vec![0u8; RECORD_SIZE];
+
+        for _ in 0..total_records {
+            reader.read_exact(&mut buf)?;
+            let key = &buf[..KEY_SIZE];
+            let payload = &buf[KEY_SIZE..];
+            appender.append_row(params![key, payload])?;
+        }
+
+        return Ok(total_records);
     }
 
-    // Multi-threaded path
+    // Channel with bounded buffer (100k records = ~10 MB in flight)
+    let (tx, rx) = sync_channel::<(Vec<u8>, Vec<u8>)>(100_000);
+
+    // Multi-threaded path: spawn reader threads
     let records_per_thread = (total_records + num_threads as u64 - 1) / num_threads as u64;
-    let total_rows = Arc::new(Mutex::new(0u64));
     let mut handles = vec![];
 
     for thread_id in 0..num_threads {
@@ -106,44 +120,47 @@ fn load_gensort_parallel(
         }
 
         let input = input.clone();
-        let db = db.clone();
-        let table = table.to_string();
-        let total_rows = Arc::clone(&total_rows);
+        let tx = tx.clone();
 
         let handle = thread::spawn(move || -> Result<u64, Box<dyn Error + Send + Sync>> {
-            let conn = Connection::open(&db)?;
-            let mut appender = conn.appender(&table)?;
-            let rows = load_gensort_chunk(&input, start_record, end_record, &mut appender)?;
-
-            let mut total = total_rows.lock().unwrap();
-            *total += rows;
-
-            Ok(rows)
+            send_gensort_chunk(&input, start_record, end_record, tx)
         });
 
         handles.push(handle);
     }
 
-    // Wait for all threads to complete
+    // Drop original sender so channel closes when all threads finish
+    drop(tx);
+
+    // Main thread: consume from channel and append to DB
+    let conn = Connection::open(db)?;
+    let mut appender = conn.appender(table)?;
+    let mut total_rows = 0u64;
+
+    for (key, payload) in rx {
+        appender.append_row(params![key.as_slice(), payload.as_slice()])?;
+        total_rows += 1;
+    }
+
+    // Wait for all threads and check for errors
     for (i, handle) in handles.into_iter().enumerate() {
         match handle.join() {
             Ok(result) => match result {
-                Ok(rows) => println!("Thread {} loaded {} rows", i, rows),
+                Ok(rows) => println!("Thread {} read {} rows", i, rows),
                 Err(e) => return Err(format!("Thread {} failed: {}", i, e).into()),
             },
             Err(_) => return Err(format!("Thread {} panicked", i).into()),
         }
     }
 
-    let total = *total_rows.lock().unwrap();
-    Ok(total)
+    Ok(total_rows)
 }
 
-fn load_gensort_chunk(
+fn send_gensort_chunk(
     input: &PathBuf,
     start_record: u64,
     end_record: u64,
-    appender: &mut Appender,
+    tx: SyncSender<(Vec<u8>, Vec<u8>)>,
 ) -> Result<u64, Box<dyn Error + Send + Sync>> {
     const KEY_SIZE: usize = 10;
     const PAYLOAD_SIZE: usize = 90;
@@ -159,10 +176,12 @@ fn load_gensort_chunk(
     for _ in 0..num_records {
         reader.read_exact(&mut buf)?;
 
-        let key = &buf[..KEY_SIZE];
-        let payload = &buf[KEY_SIZE..];
+        let key = buf[..KEY_SIZE].to_vec();
+        let payload = buf[KEY_SIZE..].to_vec();
 
-        appender.append_row(params![key, payload])?;
+        // Send to channel; blocks if channel is full (backpressure)
+        tx.send((key, payload))
+            .map_err(|_| "Failed to send record to channel")?;
     }
 
     Ok(num_records)
@@ -172,9 +191,9 @@ fn load_kvbin_parallel(
     input: &PathBuf,
     db: &PathBuf,
     table: &str,
-    num_threads: usize,
+    _num_threads: usize,
 ) -> Result<u64, Box<dyn Error + Send + Sync>> {
-    // First, read all records into memory
+    // Read all records into memory (kvbin is variable-length, can't seek)
     let file = File::open(input)?;
     let mut reader = BufReader::with_capacity(8 * 1024 * 1024, file);
     let mut records: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
@@ -202,66 +221,13 @@ fn load_kvbin_parallel(
     let total_records = records.len();
     drop(reader);
 
-    if num_threads == 1 {
-        // Single-threaded path
-        let conn = Connection::open(db)?;
-        let mut appender = conn.appender(table)?;
-        for (key, val) in records {
-            appender.append_row(params![key.as_slice(), val.as_slice()])?;
-        }
-        return Ok(total_records as u64);
+    // Sequential append with single connection
+    println!("Appending {} total rows to DuckDB...", total_records);
+    let conn = Connection::open(db)?;
+    let mut appender = conn.appender(table)?;
+    for (key, val) in &records {
+        appender.append_row(params![key.as_slice(), val.as_slice()])?;
     }
 
-    // Multi-threaded path: partition records into chunks
-    let records = Arc::new(records);
-    let records_per_thread = (total_records + num_threads - 1) / num_threads;
-    let total_rows = Arc::new(Mutex::new(0u64));
-    let mut handles = vec![];
-
-    for thread_id in 0..num_threads {
-        let start_idx = thread_id * records_per_thread;
-        let end_idx = ((thread_id + 1) * records_per_thread).min(total_records);
-
-        if start_idx >= total_records {
-            break;
-        }
-
-        let db = db.clone();
-        let table = table.to_string();
-        let records = Arc::clone(&records);
-        let total_rows = Arc::clone(&total_rows);
-
-        let handle = thread::spawn(move || -> Result<u64, Box<dyn Error + Send + Sync>> {
-            let conn = Connection::open(&db)?;
-            let mut appender = conn.appender(&table)?;
-            let mut rows = 0u64;
-
-            for i in start_idx..end_idx {
-                let (key, val) = &records[i];
-                appender.append_row(params![key.as_slice(), val.as_slice()])?;
-                rows += 1;
-            }
-
-            let mut total = total_rows.lock().unwrap();
-            *total += rows;
-
-            Ok(rows)
-        });
-
-        handles.push(handle);
-    }
-
-    // Wait for all threads to complete
-    for (i, handle) in handles.into_iter().enumerate() {
-        match handle.join() {
-            Ok(result) => match result {
-                Ok(rows) => println!("Thread {} loaded {} rows", i, rows),
-                Err(e) => return Err(format!("Thread {} failed: {}", i, e).into()),
-            },
-            Err(_) => return Err(format!("Thread {} panicked", i).into()),
-        }
-    }
-
-    let total = *total_rows.lock().unwrap();
-    Ok(total)
+    Ok(total_records as u64)
 }
