@@ -95,6 +95,7 @@ fn load_gensort_parallel(
         let file = File::open(input)?;
         let mut reader = BufReader::with_capacity(16 * 1024 * 1024, file);
         let mut buf = vec![0u8; RECORD_SIZE];
+        let mut last_million_printed = 0u64;
 
         for i in 0..total_records {
             reader.read_exact(&mut buf)?;
@@ -104,7 +105,11 @@ fn load_gensort_parallel(
 
             if (i + 1) % (BATCH_SIZE as u64 * FLUSH_INTERVAL as u64) == 0 {
                 appender.flush()?;
-                println!("Loaded {} million records...", (i + 1) / 1_000_000);
+                let current_million = (i + 1) / 1_000_000;
+                if current_million > last_million_printed {
+                    println!("Loaded {} million records...", current_million);
+                    last_million_printed = current_million;
+                }
             }
         }
 
@@ -146,6 +151,7 @@ fn load_gensort_parallel(
     let mut appender = conn.appender(table)?;
     let mut total_rows = 0u64;
     let mut batch_count = 0usize;
+    let mut last_million_printed = 0u64;
 
     for batch in rx {
         for record in &batch {
@@ -158,7 +164,11 @@ fn load_gensort_parallel(
 
         if batch_count % FLUSH_INTERVAL == 0 {
             appender.flush()?;
-            println!("Loaded {} million records...", total_rows / 1_000_000);
+            let current_million = total_rows / 1_000_000;
+            if current_million > last_million_printed {
+                println!("Loaded {} million records...", current_million);
+                last_million_printed = current_million;
+            }
         }
     }
 
