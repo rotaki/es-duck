@@ -79,6 +79,8 @@ fn load_gensort_parallel(
     const KEY_SIZE: usize = 10;
     const PAYLOAD_SIZE: usize = 90;
     const RECORD_SIZE: usize = KEY_SIZE + PAYLOAD_SIZE;
+    const BATCH_SIZE: usize = 50_000; // Process 50k records per batch
+    const FLUSH_INTERVAL: usize = 10; // Flush every 10 batches (500k records)
 
     let file = File::open(input)?;
     let file_size = file.metadata()?.len();
@@ -86,26 +88,33 @@ fn load_gensort_parallel(
     drop(file);
 
     if num_threads == 1 {
-        // Single-threaded path: read and append directly
+        // Single-threaded path: read and append directly with batching
         let conn = Connection::open(db)?;
         let mut appender = conn.appender(table)?;
 
         let file = File::open(input)?;
-        let mut reader = BufReader::with_capacity(1024 * 1024, file);
+        let mut reader = BufReader::with_capacity(16 * 1024 * 1024, file);
         let mut buf = vec![0u8; RECORD_SIZE];
 
-        for _ in 0..total_records {
+        for i in 0..total_records {
             reader.read_exact(&mut buf)?;
             let key = &buf[..KEY_SIZE];
             let payload = &buf[KEY_SIZE..];
             appender.append_row(params![key, payload])?;
+
+            if (i + 1) % (BATCH_SIZE as u64 * FLUSH_INTERVAL as u64) == 0 {
+                appender.flush()?;
+                println!("Loaded {} million records...", (i + 1) / 1_000_000);
+            }
         }
 
+        appender.flush()?;
         return Ok(total_records);
     }
 
-    // Channel with bounded buffer (100k records = ~10 MB in flight)
-    let (tx, rx) = sync_channel::<(Vec<u8>, Vec<u8>)>(100_000);
+    // Channel with batched records - send Vec of fixed-size byte arrays
+    type RecordBatch = Vec<[u8; RECORD_SIZE]>;
+    let (tx, rx) = sync_channel::<RecordBatch>(num_threads * 2);
 
     // Multi-threaded path: spawn reader threads
     let records_per_thread = (total_records + num_threads as u64 - 1) / num_threads as u64;
@@ -123,7 +132,7 @@ fn load_gensort_parallel(
         let tx = tx.clone();
 
         let handle = thread::spawn(move || -> Result<u64, Box<dyn Error + Send + Sync>> {
-            send_gensort_chunk(&input, start_record, end_record, tx)
+            send_gensort_chunk_batched(&input, start_record, end_record, tx, BATCH_SIZE)
         });
 
         handles.push(handle);
@@ -136,11 +145,24 @@ fn load_gensort_parallel(
     let conn = Connection::open(db)?;
     let mut appender = conn.appender(table)?;
     let mut total_rows = 0u64;
+    let mut batch_count = 0usize;
 
-    for (key, payload) in rx {
-        appender.append_row(params![key.as_slice(), payload.as_slice()])?;
-        total_rows += 1;
+    for batch in rx {
+        for record in &batch {
+            let key = &record[..KEY_SIZE];
+            let payload = &record[KEY_SIZE..];
+            appender.append_row(params![key, payload])?;
+        }
+        total_rows += batch.len() as u64;
+        batch_count += 1;
+
+        if batch_count % FLUSH_INTERVAL == 0 {
+            appender.flush()?;
+            println!("Loaded {} million records...", total_rows / 1_000_000);
+        }
     }
+
+    appender.flush()?;
 
     // Wait for all threads and check for errors
     for (i, handle) in handles.into_iter().enumerate() {
@@ -156,32 +178,41 @@ fn load_gensort_parallel(
     Ok(total_rows)
 }
 
-fn send_gensort_chunk(
+fn send_gensort_chunk_batched(
     input: &PathBuf,
     start_record: u64,
     end_record: u64,
-    tx: SyncSender<(Vec<u8>, Vec<u8>)>,
+    tx: SyncSender<Vec<[u8; 100]>>,
+    batch_size: usize,
 ) -> Result<u64, Box<dyn Error + Send + Sync>> {
-    const KEY_SIZE: usize = 10;
-    const PAYLOAD_SIZE: usize = 90;
-    const RECORD_SIZE: usize = KEY_SIZE + PAYLOAD_SIZE;
+    const RECORD_SIZE: usize = 100;
 
     let mut file = File::open(input)?;
     file.seek(SeekFrom::Start(start_record * RECORD_SIZE as u64))?;
 
-    let mut reader = BufReader::with_capacity(1024 * 1024, file);
-    let mut buf = vec![0u8; RECORD_SIZE];
+    let mut reader = BufReader::with_capacity(16 * 1024 * 1024, file);
     let num_records = end_record - start_record;
 
+    // Allocate batch buffer once and reuse it
+    let mut batch = Vec::with_capacity(batch_size);
+
     for _ in 0..num_records {
-        reader.read_exact(&mut buf)?;
+        let mut record = [0u8; RECORD_SIZE];
+        reader.read_exact(&mut record)?;
+        batch.push(record);
 
-        let key = buf[..KEY_SIZE].to_vec();
-        let payload = buf[KEY_SIZE..].to_vec();
+        // Send full batches
+        if batch.len() >= batch_size {
+            tx.send(batch)
+                .map_err(|_| "Failed to send batch to channel")?;
+            batch = Vec::with_capacity(batch_size);
+        }
+    }
 
-        // Send to channel; blocks if channel is full (backpressure)
-        tx.send((key, payload))
-            .map_err(|_| "Failed to send record to channel")?;
+    // Send remaining records
+    if !batch.is_empty() {
+        tx.send(batch)
+            .map_err(|_| "Failed to send batch to channel")?;
     }
 
     Ok(num_records)
