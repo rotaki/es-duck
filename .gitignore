@@ -4,4 +4,8 @@
 /scripts/postgres/
 /scripts/postgres-data/
 /scripts/postgres.log
+
+# Local DuckDB installation
+/scripts/duckdb/
+
 /testdata/test_gensort_*
