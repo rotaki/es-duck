@@ -9,9 +9,10 @@ FORMAT="${FORMAT:-gensort}"
 DB_FILE="${DB_FILE:-./duckdb_bench.db}"
 TABLE="${TABLE:-bench_data}"
 OUTPUT_BASE="${OUTPUT_BASE:-./duckdb_sorted/result}"
-MEMORY_LIMIT="${MEMORY_LIMIT:-2GB}"
+MEMORY_LIMIT="${MEMORY_LIMIT:-100GB}"
 TEMP_DIR="${TEMP_DIR:-./duckdb_temp}"
-THREAD_COUNTS="${THREAD_COUNTS:-4 8 16 24 32 40 44}"
+# THREAD_COUNTS="${THREAD_COUNTS:-4 8 16 24 32 40 44}"
+THREAD_COUNTS="${THREAD_COUNTS:-44 40 32 24 16 8 4}"
 LOG_DIR="${LOG_DIR:-./logs/duckdb_parallelism_sweep}"
 
 echo "=== DuckDB Parallelism Sweep ==="
@@ -134,6 +135,17 @@ for T in $THREAD_COUNTS; do
         echo "Output directory removed."
     fi
 
+    # Clean up temp directory after each run
+    if [ -d "$TEMP_DIR" ]; then
+        echo "Cleaning up temp directory..."
+        rm -rf "$TEMP_DIR"/*
+        sync
+        echo "Temp directory cleaned."
+    fi
+
+    echo ""
+    echo "Waiting 30 seconds before next run..."
+    sleep 30
     echo ""
 done
 

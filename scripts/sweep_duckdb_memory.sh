@@ -12,7 +12,7 @@ OUTPUT_BASE="${OUTPUT_BASE:-./duckdb_sorted/result}"
 THREADS="${THREADS:-40}"
 TEMP_DIR="${TEMP_DIR:-./duckdb_temp}"
 # MEMORY_LIMITS="${MEMORY_LIMITS:-2GB 4GB 6GB 8GB 16GB 24GB 32GB}"
-MEMORY_LIMITS="${MEMORY_LIMITS:-2GB}"
+MEMORY_LIMITS="${MEMORY_LIMITS:-100GB}"
 LOG_DIR="${LOG_DIR:-./logs/duckdb_memory_sweep}"
 
 echo "=== DuckDB Memory Sweep ==="
@@ -135,6 +135,17 @@ for MEM in $MEMORY_LIMITS; do
         echo "Output directory removed."
     fi
 
+    # Clean up temp directory after each run
+    if [ -d "$TEMP_DIR" ]; then
+        echo "Cleaning up temp directory..."
+        rm -rf "$TEMP_DIR"/*
+        sync
+        echo "Temp directory cleaned."
+    fi
+
+    echo ""
+    echo "Waiting 30 seconds before next run..."
+    sleep 30
     echo ""
 done
 
