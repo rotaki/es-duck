@@ -61,8 +61,8 @@ for MEM in $MEMORY_LIMITS; do
 
     OUTPUT_DIR="${OUTPUT_BASE}_${MEM}"
 
-    # Remove old output
-    rm -rf "$OUTPUT_DIR"
+    # Remove old output file if it exists
+    rm -f "$OUTPUT_DIR"
 
     # Run and capture output and exit code
     set +e
@@ -125,14 +125,14 @@ for MEM in $MEMORY_LIMITS; do
         echo "Warning: Could not extract timing information"
     fi
 
-    # Clean up output directory to save SSD space
-    if [ -d "$OUTPUT_DIR" ]; then
-        echo "Cleaning up output directory..."
-        # Truncate all files in the directory to 0 bytes first
-        find "$OUTPUT_DIR" -type f -exec truncate -s 0 {} \;
+    # Clean up output file to save SSD space
+    if [ -e "$OUTPUT_DIR" ]; then
+        echo "Cleaning up output file..."
+        # Truncate the file to 0 bytes first
+        truncate -s 0 "$OUTPUT_DIR"
         sync
-        rm -rf "$OUTPUT_DIR"
-        echo "Output directory removed."
+        rm -f "$OUTPUT_DIR"
+        echo "Output file removed."
     fi
 
     # Clean up temp directory after each run
@@ -150,5 +150,5 @@ for MEM in $MEMORY_LIMITS; do
 done
 
 echo "=== Sweep Complete ==="
-echo "All output directories have been cleaned up to save SSD space."
+echo "All output files have been cleaned up to save SSD space."
 echo "Results saved to logs in: $LOG_DIR"
