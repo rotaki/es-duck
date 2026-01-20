@@ -8,7 +8,6 @@ INPUT_FILE="${INPUT_FILE:-testdata/test_gensort_5gb.dat}"
 FORMAT="${FORMAT:-gensort}"
 DB_CONNECTION="${DB_CONNECTION:-postgres://postgres@localhost:5433/bench}"
 TABLE="${TABLE:-bench_data}"
-OUTPUT_BASE="${OUTPUT_BASE:-./postgres_sorted/result}"
 PARALLEL_WORKERS="${PARALLEL_WORKERS:-40}"
 # MEMORY_LIMITS="${MEMORY_LIMITS:-1GB 4GB 6GB 8GB 16GB 24GB 32GB}"
 MEMORY_LIMITS="${MEMORY_LIMITS:-2GB}"
@@ -26,9 +25,6 @@ echo ""
 
 # Create log directory
 mkdir -p "$LOG_DIR"
-
-# Create output directory
-mkdir -p "$(dirname "$OUTPUT_BASE")"
 
 # Extract database name from connection string
 DB_NAME=$(echo "$DB_CONNECTION" | sed -n 's|.*://.*@.*/\([^?]*\).*|\1|p' || echo "$DB_CONNECTION" | sed -n 's|.*://[^/]*/\([^?]*\).*|\1|p')
@@ -73,23 +69,11 @@ for MEM in $MEMORY_LIMITS; do
     echo "========================================="
     echo "Log file: $LOG_FILE"
 
-    OUTPUT_FILE="${OUTPUT_BASE}_${MEM}.bin"
-    # Convert to absolute path for PostgreSQL COPY command
-    if [[ "$OUTPUT_FILE" = /* ]]; then
-        OUTPUT_FILE_ABS="$OUTPUT_FILE"
-    else
-        OUTPUT_FILE_ABS="$(pwd)/$OUTPUT_FILE"
-    fi
-
-    # Remove old output
-    rm -f "$OUTPUT_FILE"
-
     # Run and capture output and exit code
     set +e
     OUTPUT=$(cargo run --release --bin sort-postgres -- \
         --db "$DB_CONNECTION" \
         --table "$TABLE" \
-        --output "$OUTPUT_FILE_ABS" \
         --total-memory "$MEM" \
         --parallel-workers "$PARALLEL_WORKERS" 2>&1)
     EXIT_CODE=$?
@@ -143,18 +127,8 @@ for MEM in $MEMORY_LIMITS; do
         echo "Warning: Could not extract timing information"
     fi
 
-    # Clean up output file to save SSD space
-    if [ -f "$OUTPUT_FILE_ABS" ]; then
-        echo "Cleaning up output file..."
-        truncate -s 0 "$OUTPUT_FILE_ABS"
-        sync
-        rm -f "$OUTPUT_FILE_ABS"
-        echo "Output file removed."
-    fi
-
     echo ""
 done
 
 echo "=== Sweep Complete ==="
-echo "All output files have been cleaned up to save SSD space."
 echo "Results saved to logs in: $LOG_DIR"

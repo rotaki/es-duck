@@ -128,24 +128,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     // --- Final Execution ---
-    let output_path = args.output.display();
-    let copy_query = format!(
-        "COPY ({}) TO '{}' WITH (FORMAT binary)",
-        select_query, output_path
+    let count_query = format!(
+        "SELECT count(payload) FROM (SELECT payload FROM {} ORDER BY sort_key OFFSET 1) AS subquery",
+        args.table
     );
 
-    println!("\nExecuting COPY to {}...", output_path);
+    println!("\nExecuting count query...");
     let start = Instant::now();
-    client.batch_execute(&copy_query)?;
+    let count: i64 = client.query_one(&count_query, &[])?.get(0);
     client.batch_execute("COMMIT")?;
     let duration = start.elapsed();
 
-    // --- Print output file size ---
-    if let Ok(metadata) = std::fs::metadata(&args.output) {
-        let output_size_gb = metadata.len() as f64 / (1024.0 * 1024.0 * 1024.0);
-        println!("Output file size: {:.2} GB", output_size_gb);
-    }
-
+    println!("Count result: {}", count);
     println!("TIMING: {:.2} seconds", duration.as_secs_f64());
 
     Ok(())

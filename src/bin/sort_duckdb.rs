@@ -100,35 +100,27 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("{}", plan_result);
     println!("======================\n");
 
-    // Build the COPY query for external sorting
-    let output_path = args.output.display();
+    // Build the count query with OFFSET 1
     let query = format!(
-        r#"COPY ({}) TO '{}' (FORMAT PARQUET, PRESERVE_ORDER true);"#,
-        select_query, output_path
+        r#"SELECT count(payload)
+FROM (SELECT payload
+FROM {}
+ORDER BY sort_key
+OFFSET 1);"#,
+        args.table
     );
 
     println!("Running external sort on table '{}'...", args.table);
-    println!("Output: {:?}", args.output);
 
     let start = Instant::now();
-    conn.execute(&query, [])?;
+    let count: i64 = conn.query_row(&query, [], |row| row.get(0))?;
     let duration = start.elapsed();
 
-    // Get output size
-    let output_size = get_dir_size(&args.output)?;
     println!(
         "\nExternal sorting completed in {:.2} seconds.",
         duration.as_secs_f64()
     );
-    println!(
-        "Output size: {} bytes ({:.2} GB)",
-        output_size,
-        output_size as f64 / 1_073_741_824.0
-    );
-    println!(
-        "Compression ratio: {:.2}%",
-        (output_size as f64 / table_size_bytes as f64) * 100.0
-    );
+    println!("Count result: {}", count);
     println!("TIMING: {:.2}", duration.as_secs_f64());
     Ok(())
 }

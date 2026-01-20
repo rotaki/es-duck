@@ -8,7 +8,6 @@ INPUT_FILE="${INPUT_FILE:-testdata/test_gensort_5gb.dat}"
 FORMAT="${FORMAT:-gensort}"
 DB_FILE="${DB_FILE:-./duckdb_bench.db}"
 TABLE="${TABLE:-bench_data}"
-OUTPUT_BASE="${OUTPUT_BASE:-./duckdb_sorted/result}"
 THREADS="${THREADS:-40}"
 TEMP_DIR="${TEMP_DIR:-./duckdb_temp}"
 # MEMORY_LIMITS="${MEMORY_LIMITS:-2GB 4GB 6GB 8GB 16GB 24GB 32GB}"
@@ -28,8 +27,6 @@ echo ""
 # Create log directory
 mkdir -p "$LOG_DIR"
 
-# Create output and temp directories
-mkdir -p "$(dirname "$OUTPUT_BASE")"
 # Create temp directory
 mkdir -p "$TEMP_DIR"
 
@@ -59,17 +56,11 @@ for MEM in $MEMORY_LIMITS; do
     echo "========================================="
     echo "Log file: $LOG_FILE"
 
-    OUTPUT_DIR="${OUTPUT_BASE}_${MEM}"
-
-    # Remove old output file if it exists
-    rm -f "$OUTPUT_DIR"
-
     # Run and capture output and exit code
     set +e
     OUTPUT=$(cargo run --release --bin sort-duckdb -- \
         --db "$DB_FILE" \
         --table "$TABLE" \
-        --output "$OUTPUT_DIR" \
         --memory-limit "$MEM" \
         --temp-dir "$TEMP_DIR" \
         --threads "$THREADS" 2>&1)
@@ -125,16 +116,6 @@ for MEM in $MEMORY_LIMITS; do
         echo "Warning: Could not extract timing information"
     fi
 
-    # Clean up output file to save SSD space
-    if [ -e "$OUTPUT_DIR" ]; then
-        echo "Cleaning up output file..."
-        # Truncate the file to 0 bytes first
-        truncate -s 0 "$OUTPUT_DIR"
-        sync
-        rm -f "$OUTPUT_DIR"
-        echo "Output file removed."
-    fi
-
     # Clean up temp directory after each run
     if [ -d "$TEMP_DIR" ]; then
         echo "Cleaning up temp directory..."
@@ -150,5 +131,4 @@ for MEM in $MEMORY_LIMITS; do
 done
 
 echo "=== Sweep Complete ==="
-echo "All output files have been cleaned up to save SSD space."
 echo "Results saved to logs in: $LOG_DIR"
