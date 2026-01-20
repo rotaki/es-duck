@@ -1,7 +1,6 @@
 use clap::Parser;
 use postgres::{Client, NoTls};
 use std::error::Error;
-use std::path::PathBuf;
 use std::time::Instant;
 
 #[derive(Parser)]
@@ -12,9 +11,6 @@ struct Args {
 
     #[arg(long, default_value = "bench_data")]
     table: String,
-
-    #[arg(long)]
-    output: PathBuf,
 
     /// TOTAL memory budget for the entire sort (e.g., "2GB", "4GB")
     #[arg(long, default_value = "2GB")]

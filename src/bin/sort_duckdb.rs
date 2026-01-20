@@ -6,7 +6,7 @@ use std::time::Instant;
 
 #[derive(Parser)]
 #[command(name = "sort-duckdb")]
-#[command(about = "Run external sorting on a DuckDB database and export to Parquet")]
+#[command(about = "Run external sorting on a DuckDB database")]
 struct Args {
     /// Path to the DuckDB database file
     #[arg(long)]
@@ -15,10 +15,6 @@ struct Args {
     /// Table name to sort
     #[arg(long, default_value = "bench_data")]
     table: String,
-
-    /// Output directory for sorted Parquet files
-    #[arg(long)]
-    output: PathBuf,
 
     /// Temporary directory for DuckDB spilling (should be on fast SSD)
     #[arg(long)]
@@ -123,26 +119,4 @@ OFFSET 1);"#,
     println!("Count result: {}", count);
     println!("TIMING: {:.2}", duration.as_secs_f64());
     Ok(())
-}
-
-fn get_dir_size(path: &PathBuf) -> Result<u64, Box<dyn Error>> {
-    let mut total_size = 0u64;
-
-    if path.is_file() {
-        return Ok(std::fs::metadata(path)?.len());
-    }
-
-    if path.is_dir() {
-        for entry in std::fs::read_dir(path)? {
-            let entry = entry?;
-            let metadata = entry.metadata()?;
-            if metadata.is_file() {
-                total_size += metadata.len();
-            } else if metadata.is_dir() {
-                total_size += get_dir_size(&entry.path().into())?;
-            }
-        }
-    }
-
-    Ok(total_size)
 }

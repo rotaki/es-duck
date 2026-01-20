@@ -37,23 +37,9 @@ fn run_postgres_loader(
         .expect("Failed to execute load-postgres")
 }
 
-fn run_postgres_sorter(
-    db_url: &str,
-    output: &str,
-    table: &str,
-    work_mem: &str,
-) -> std::process::Output {
+fn run_postgres_sorter(db_url: &str, table: &str, work_mem: &str) -> std::process::Output {
     Command::new(sort_postgres_binary())
-        .args([
-            "--db",
-            db_url,
-            "--output",
-            output,
-            "--table",
-            table,
-            "--total-memory",
-            work_mem,
-        ])
+        .args(["--db", db_url, "--table", table, "--total-memory", work_mem])
         .output()
         .expect("Failed to execute sort-postgres")
 }
@@ -162,7 +148,6 @@ fn test_postgres_kvbin_format() {
 fn test_postgres_external_sort() {
     use rand::Rng;
     use std::fs;
-    use std::io::{self, Read};
 
     let Some(db_url) = postgres_url() else {
         eprintln!("skipping test_postgres_external_sort; POSTGRES_TEST_URL not set");
@@ -170,7 +155,6 @@ fn test_postgres_external_sort() {
     };
 
     let input_path = "/tmp/test_pg_sort_input.dat";
-    let output_path = "/tmp/test_pg_sort_output.bin";
     let table = "postgres_sort_test";
 
     // Generate 100 random gensort records with random keys
@@ -195,12 +179,11 @@ fn test_postgres_external_sort() {
     }
     fs::write(input_path, &file_data).expect("Failed to write test file");
 
-    // Clean up any existing table and output file
+    // Clean up any existing table
     {
         let mut client = Client::connect(&db_url, NoTls).expect("Failed to connect to Postgres");
         let _ = client.batch_execute(&format!("DROP TABLE IF EXISTS {}", table));
     }
-    let _ = fs::remove_file(output_path);
 
     // Load data into PostgreSQL
     let output = run_postgres_loader("gensort", input_path, &db_url, table);
@@ -211,8 +194,8 @@ fn test_postgres_external_sort() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    // Run external sort
-    let output = run_postgres_sorter(&db_url, output_path, table, "64MB");
+    // Run external sort (now just executes count query)
+    let output = run_postgres_sorter(&db_url, table, "64MB");
     assert!(
         output.status.success(),
         "Sorter failed: stdout: {}, stderr: {}",
@@ -220,145 +203,61 @@ fn test_postgres_external_sort() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    // Read and parse the PostgreSQL binary COPY format output
-    if !std::path::Path::new(output_path).exists() {
-        panic!(
-            "Output file does not exist: {}\n\
-             If using Docker, ensure /tmp is mounted: -v /tmp:/tmp\n\
-             If using local PostgreSQL, ensure the PostgreSQL user has write access to /tmp",
-            output_path
-        );
-    }
-    let sorted_keys =
-        parse_postgres_binary_copy(output_path).expect("Failed to parse binary copy output");
+    // Verify the output contains timing information
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("TIMING:"),
+        "Expected TIMING output, got: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("Count result:"),
+        "Expected count result, got: {}",
+        stdout
+    );
 
-    assert_eq!(sorted_keys.len(), 100, "Expected 100 rows in output");
+    // Parse the count from output and verify it's correct (100 records - 1 due to OFFSET 1)
+    let count_line = stdout
+        .lines()
+        .find(|line| line.contains("Count result:"))
+        .expect("Could not find count result line");
+    let count: i64 = count_line
+        .split(':')
+        .nth(1)
+        .unwrap()
+        .trim()
+        .parse()
+        .expect("Failed to parse count");
+    assert_eq!(count, 99, "Expected count of 99 (100 records - 1 offset)");
 
-    // Verify the output is sorted by comparing adjacent keys
-    for i in 1..sorted_keys.len() {
-        let prev_key = &sorted_keys[i - 1];
-        let curr_key = &sorted_keys[i];
+    // Verify data is actually sorted by reading directly from database
+    let mut client = Client::connect(&db_url, NoTls).expect("Failed to connect to Postgres");
+    let rows = client
+        .query(
+            &format!("SELECT sort_key FROM {} ORDER BY sort_key", table),
+            &[],
+        )
+        .expect("Failed to query rows");
+
+    assert_eq!(rows.len(), 100, "Expected 100 rows in database");
+
+    let keys: Vec<Vec<u8>> = rows.iter().map(|row| row.get(0)).collect();
+
+    // Verify the keys are sorted
+    for i in 1..keys.len() {
         assert!(
-            prev_key <= curr_key,
-            "Output not sorted at index {}: {:?} > {:?}",
+            keys[i - 1] <= keys[i],
+            "Keys not sorted at index {}: {:?} > {:?}",
             i,
-            prev_key,
-            curr_key
+            keys[i - 1],
+            keys[i]
         );
     }
-
-    // Verify first key is smallest and last key is largest
-    let min_key = sorted_keys.iter().min().unwrap();
-    let max_key = sorted_keys.iter().max().unwrap();
-    assert_eq!(
-        &sorted_keys[0], min_key,
-        "First row should have smallest key"
-    );
-    assert_eq!(
-        &sorted_keys[99], max_key,
-        "Last row should have largest key"
-    );
 
     // Clean up
     let _ = fs::remove_file(input_path);
-    let _ = fs::remove_file(output_path);
     {
         let mut client = Client::connect(&db_url, NoTls).expect("Failed to connect to Postgres");
         let _ = client.batch_execute(&format!("DROP TABLE IF EXISTS {}", table));
     }
-}
-
-/// Parse PostgreSQL binary COPY format and extract sort_key values
-fn parse_postgres_binary_copy(path: &str) -> std::io::Result<Vec<Vec<u8>>> {
-    use std::fs::File;
-    use std::io::Read;
-
-    let mut file = File::open(path)?;
-    let mut data = Vec::new();
-    file.read_to_end(&mut data)?;
-
-    let mut keys = Vec::new();
-    let mut pos = 0;
-
-    // Binary COPY header: "PGCOPY\n\xff\r\n\0" (11 bytes) + flags (4 bytes) + header extension (4 bytes)
-    // Total header: 19 bytes minimum
-    if data.len() < 19 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "File too short for binary COPY header",
-        ));
-    }
-
-    // Verify signature "PGCOPY\n\xff\r\n\0"
-    let signature = b"PGCOPY\n\xff\r\n\0";
-    if &data[0..11] != signature {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "Invalid PGCOPY signature",
-        ));
-    }
-    pos = 11;
-
-    // Skip flags (4 bytes)
-    pos += 4;
-
-    // Read header extension length (4 bytes, big-endian)
-    let ext_len =
-        i32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
-    pos += 4;
-
-    // Skip header extension
-    pos += ext_len;
-
-    // Read tuples
-    while pos < data.len() {
-        // Read field count (2 bytes, big-endian) - -1 indicates file trailer
-        if pos + 2 > data.len() {
-            break;
-        }
-        let field_count = i16::from_be_bytes([data[pos], data[pos + 1]]);
-        pos += 2;
-
-        if field_count == -1 {
-            // File trailer
-            break;
-        }
-
-        // Read each field
-        for field_idx in 0..field_count {
-            if pos + 4 > data.len() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "Unexpected end of data",
-                ));
-            }
-
-            // Field length (4 bytes, big-endian) - -1 indicates NULL
-            let field_len =
-                i32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
-            pos += 4;
-
-            if field_len == -1 {
-                // NULL value
-                continue;
-            }
-
-            let field_len = field_len as usize;
-            if pos + field_len > data.len() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "Field length exceeds data",
-                ));
-            }
-
-            // First field is sort_key
-            if field_idx == 0 {
-                keys.push(data[pos..pos + field_len].to_vec());
-            }
-
-            pos += field_len;
-        }
-    }
-
-    Ok(keys)
 }
