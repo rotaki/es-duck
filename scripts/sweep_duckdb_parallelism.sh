@@ -4,6 +4,9 @@
 
 set -e
 
+# Generate timestamp for this sweep run
+SWEEP_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+
 # Configuration
 INPUT_FILE="${INPUT_FILE:-testdata/test_gensort.dat}"
 FORMAT="${FORMAT:-gensort}"
@@ -13,8 +16,9 @@ MEMORY_LIMIT="${MEMORY_LIMIT:-100GB}"
 TEMP_DIR="${TEMP_DIR:-./duckdb_temp}"
 # THREAD_COUNTS="${THREAD_COUNTS:-4 8 16 24 32 40 44}"
 THREAD_COUNTS="${THREAD_COUNTS:-44 40 32 24 16 8 4}"
-LOG_DIR="${LOG_DIR:-./logs/duckdb_parallelism_sweep}"
+LOG_DIR="${LOG_DIR:-./logs/duckdb_parallelism_sweep_${SWEEP_TIMESTAMP}}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-7200}"  # 2 hour default timeout
+OUTPUT="${OUTPUT:-}"  # Optional output path for parquet mode
 
 echo "=== DuckDB Parallelism Sweep ==="
 echo "Input: $INPUT_FILE"
@@ -25,6 +29,11 @@ echo "Memory limit: $MEMORY_LIMIT"
 echo "Thread counts: $THREAD_COUNTS"
 echo "Timeout: ${TIMEOUT_SECONDS}s"
 echo "Log directory: $LOG_DIR"
+if [ -n "$OUTPUT" ]; then
+    echo "Mode: Parquet output to $OUTPUT"
+else
+    echo "Mode: Count (no output)"
+fi
 echo ""
 
 # Create log directory
@@ -74,18 +83,36 @@ for T in $THREAD_COUNTS; do
 
     # Run with timeout and show output in real-time using tee
     set +e
-    timeout $TIMEOUT_SECONDS cargo run --release --bin sort-duckdb -- \
-        --db "$DB_FILE" \
-        --table "$TABLE" \
-        --memory-limit "$MEMORY_LIMIT" \
-        --temp-dir "$TEMP_DIR" \
-        --threads "$T" 2>&1 | tee "$TEMP_OUTPUT"
+    if [ -n "$OUTPUT" ]; then
+        # Parquet mode: truncate output file first in case it's open
+        if [ -f "$OUTPUT" ]; then
+            echo "Truncating existing output file..."
+            > "$OUTPUT"
+            sync
+        fi
+
+        timeout $TIMEOUT_SECONDS cargo run --release --bin sort-duckdb -- \
+            --db "$DB_FILE" \
+            --table "$TABLE" \
+            --memory-limit "$MEMORY_LIMIT" \
+            --temp-dir "$TEMP_DIR" \
+            --threads "$T" \
+            --output "$OUTPUT" 2>&1 | tee "$TEMP_OUTPUT"
+    else
+        # Count mode
+        timeout $TIMEOUT_SECONDS cargo run --release --bin sort-duckdb -- \
+            --db "$DB_FILE" \
+            --table "$TABLE" \
+            --memory-limit "$MEMORY_LIMIT" \
+            --temp-dir "$TEMP_DIR" \
+            --threads "$T" 2>&1 | tee "$TEMP_OUTPUT"
+    fi
 
     EXIT_CODE=${PIPESTATUS[0]}
     set -e
 
     # Read captured output
-    OUTPUT=$(cat "$TEMP_OUTPUT")
+    COMMAND_OUTPUT=$(cat "$TEMP_OUTPUT")
 
     # Check timeout
     if [ $EXIT_CODE -eq 124 ]; then
@@ -94,7 +121,7 @@ for T in $THREAD_COUNTS; do
     fi
 
     # Extract timing from output
-    DURATION=$(echo "$OUTPUT" | grep "TIMING:" | awk '{print $2}')
+    DURATION=$(echo "$COMMAND_OUTPUT" | grep "TIMING:" | awk '{print $2}')
 
     # Write detailed log to individual file
     {
@@ -121,7 +148,7 @@ for T in $THREAD_COUNTS; do
         echo "========================================="
         echo "Full output:"
         echo "========================================="
-        echo "$OUTPUT"
+        echo "$COMMAND_OUTPUT"
         echo ""
         echo "========================================="
         echo "Summary:"
@@ -149,6 +176,18 @@ for T in $THREAD_COUNTS; do
     fi
     echo "End time: $(date +"%Y-%m-%d %H:%M:%S")"
     echo "========================================="
+
+    # Clean up parquet output file if it exists
+    if [ -n "$OUTPUT" ] && [ -f "$OUTPUT" ]; then
+        echo "Cleaning up output file..."
+        OUTPUT_SIZE=$(du -sh "$OUTPUT" 2>/dev/null | cut -f1 || echo "unknown")
+        echo "Output file size: $OUTPUT_SIZE"
+        # Truncate first in case file is still open by DuckDB
+        > "$OUTPUT"
+        rm -f "$OUTPUT"
+        sync
+        echo "Output file removed and synced."
+    fi
 
     # Clean up temp directory after each run
     if [ -d "$TEMP_DIR" ]; then

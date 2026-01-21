@@ -3,6 +3,9 @@
 
 set -e
 
+# Generate timestamp for this sweep run
+SWEEP_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+
 # Configuration
 INPUT_FILE="${INPUT_FILE:-testdata/test_gensort_5gb.dat}"
 FORMAT="${FORMAT:-gensort}"
@@ -12,7 +15,8 @@ THREADS="${THREADS:-40}"
 TEMP_DIR="${TEMP_DIR:-./duckdb_temp}"
 # MEMORY_LIMITS="${MEMORY_LIMITS:-2GB 4GB 6GB 8GB 16GB 24GB 32GB}"
 MEMORY_LIMITS="${MEMORY_LIMITS:-100GB}"
-LOG_DIR="${LOG_DIR:-./logs/duckdb_memory_sweep}"
+LOG_DIR="${LOG_DIR:-./logs/duckdb_memory_sweep_${SWEEP_TIMESTAMP}}"
+OUTPUT="${OUTPUT:-}"  # Optional output path for parquet mode
 
 echo "=== DuckDB Memory Sweep ==="
 echo "Input: $INPUT_FILE"
@@ -22,6 +26,11 @@ echo "Table: $TABLE"
 echo "Threads: $THREADS"
 echo "Memory limits: $MEMORY_LIMITS"
 echo "Log directory: $LOG_DIR"
+if [ -n "$OUTPUT" ]; then
+    echo "Mode: Parquet output to $OUTPUT"
+else
+    echo "Mode: Count (no output)"
+fi
 echo ""
 
 # Create log directory
@@ -58,19 +67,37 @@ for MEM in $MEMORY_LIMITS; do
 
     # Run and capture output and exit code
     set +e
-    OUTPUT=$(cargo run --release --bin sort-duckdb -- \
-        --db "$DB_FILE" \
-        --table "$TABLE" \
-        --memory-limit "$MEM" \
-        --temp-dir "$TEMP_DIR" \
-        --threads "$THREADS" 2>&1)
+    if [ -n "$OUTPUT" ]; then
+        # Parquet mode: truncate output file first in case it's open
+        if [ -f "$OUTPUT" ]; then
+            echo "Truncating existing output file..."
+            > "$OUTPUT"
+            sync
+        fi
+
+        COMMAND_OUTPUT=$(cargo run --release --bin sort-duckdb -- \
+            --db "$DB_FILE" \
+            --table "$TABLE" \
+            --memory-limit "$MEM" \
+            --temp-dir "$TEMP_DIR" \
+            --threads "$THREADS" \
+            --output "$OUTPUT" 2>&1)
+    else
+        # Count mode
+        COMMAND_OUTPUT=$(cargo run --release --bin sort-duckdb -- \
+            --db "$DB_FILE" \
+            --table "$TABLE" \
+            --memory-limit "$MEM" \
+            --temp-dir "$TEMP_DIR" \
+            --threads "$THREADS" 2>&1)
+    fi
     EXIT_CODE=$?
     set -e
 
-    echo "$OUTPUT"
+    echo "$COMMAND_OUTPUT"
 
     # Extract timing from output
-    DURATION=$(echo "$OUTPUT" | grep "TIMING:" | awk '{print $2}')
+    DURATION=$(echo "$COMMAND_OUTPUT" | grep "TIMING:" | awk '{print $2}')
 
     # Write detailed log to individual file
     {
@@ -94,7 +121,7 @@ for MEM in $MEMORY_LIMITS; do
         echo "========================================="
         echo "Full output:"
         echo "========================================="
-        echo "$OUTPUT"
+        echo "$COMMAND_OUTPUT"
         echo ""
         echo "========================================="
         echo "Summary:"
@@ -114,6 +141,18 @@ for MEM in $MEMORY_LIMITS; do
         echo "Result logged: memory_limit=$MEM, threads=$THREADS, duration=${DURATION}s"
     else
         echo "Warning: Could not extract timing information"
+    fi
+
+    # Clean up parquet output file if it exists
+    if [ -n "$OUTPUT" ] && [ -f "$OUTPUT" ]; then
+        echo "Cleaning up output file..."
+        OUTPUT_SIZE=$(du -sh "$OUTPUT" 2>/dev/null | cut -f1 || echo "unknown")
+        echo "Output file size: $OUTPUT_SIZE"
+        # Truncate first in case file is still open by DuckDB
+        > "$OUTPUT"
+        rm -f "$OUTPUT"
+        sync
+        echo "Output file removed and synced."
     fi
 
     # Clean up temp directory after each run

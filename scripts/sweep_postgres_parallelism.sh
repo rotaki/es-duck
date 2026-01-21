@@ -3,6 +3,9 @@
 
 set -e
 
+# Generate timestamp for this sweep run
+SWEEP_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+
 # Configuration
 INPUT_FILE="${INPUT_FILE:-testdata/test_gensort.dat}"
 FORMAT="${FORMAT:-gensort}"
@@ -10,7 +13,7 @@ DB_CONNECTION="${DB_CONNECTION:-postgres://postgres@localhost:5433/bench}"
 TABLE="${TABLE:-bench_data}"
 WORK_MEM="${WORK_MEM:-2GB}"
 WORKER_COUNTS="${WORKER_COUNTS:-4 8 16 24 32 40 44}"
-LOG_DIR="${LOG_DIR:-./logs/postgres_parallelism_sweep}"
+LOG_DIR="${LOG_DIR:-./logs/postgres_parallelism_sweep_${SWEEP_TIMESTAMP}}"
 
 echo "=== PostgreSQL Parallelism Sweep ==="
 echo "Input: $INPUT_FILE"

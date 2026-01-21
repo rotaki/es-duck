@@ -3,6 +3,9 @@
 
 set -e
 
+# Generate timestamp for this sweep run
+SWEEP_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+
 # Configuration
 INPUT_FILE="${INPUT_FILE:-testdata/test_gensort_5gb.dat}"
 FORMAT="${FORMAT:-gensort}"
@@ -11,7 +14,7 @@ TABLE="${TABLE:-bench_data}"
 PARALLEL_WORKERS="${PARALLEL_WORKERS:-40}"
 # MEMORY_LIMITS="${MEMORY_LIMITS:-1GB 4GB 6GB 8GB 16GB 24GB 32GB}"
 MEMORY_LIMITS="${MEMORY_LIMITS:-2GB}"
-LOG_DIR="${LOG_DIR:-./logs/postgres_memory_sweep}"
+LOG_DIR="${LOG_DIR:-./logs/postgres_memory_sweep_${SWEEP_TIMESTAMP}}"
 
 echo "=== PostgreSQL Memory Sweep ==="
 echo "Input: $INPUT_FILE"
