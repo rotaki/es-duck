@@ -15,15 +15,25 @@ PARALLEL_WORKERS="${PARALLEL_WORKERS:-40}"
 # MEMORY_LIMITS="${MEMORY_LIMITS:-1GB 4GB 6GB 8GB 16GB 24GB 32GB}"
 MEMORY_LIMITS="${MEMORY_LIMITS:-2GB}"
 LOG_DIR="${LOG_DIR:-./logs/postgres_memory_sweep_${SWEEP_TIMESTAMP}}"
+TEMP_TABLESPACE="${TEMP_TABLESPACE:-}"  # Optional temp tablespace for spilling
+OUTPUT="${OUTPUT:-}"  # Optional output path for binary mode
 
 echo "=== PostgreSQL Memory Sweep ==="
 echo "Input: $INPUT_FILE"
 echo "Format: $FORMAT"
 echo "Database: $DB_CONNECTION"
 echo "Table: $TABLE"
-echo "Parallel workers: $PARALLEL_WORKERS"
+echo "Parallel workers: $PARALLEL_WORKERS (Total processes: $((PARALLEL_WORKERS + 1)))"
 echo "Memory limits: $MEMORY_LIMITS"
 echo "Log directory: $LOG_DIR"
+if [ -n "$TEMP_TABLESPACE" ]; then
+    echo "Temp tablespace: $TEMP_TABLESPACE"
+fi
+if [ -n "$OUTPUT" ]; then
+    echo "Mode: Binary output to $OUTPUT"
+else
+    echo "Mode: Count (no output)"
+fi
 echo ""
 
 # Create log directory
@@ -74,18 +84,58 @@ for MEM in $MEMORY_LIMITS; do
 
     # Run and capture output and exit code
     set +e
-    OUTPUT=$(cargo run --release --bin sort-postgres -- \
-        --db "$DB_CONNECTION" \
-        --table "$TABLE" \
-        --total-memory "$MEM" \
-        --parallel-workers "$PARALLEL_WORKERS" 2>&1)
+    if [ -n "$OUTPUT" ]; then
+        # Binary output mode: truncate output file first in case it exists
+        if [ -f "$OUTPUT" ]; then
+            echo "Truncating existing output file..."
+            > "$OUTPUT"
+            sync
+        fi
+
+        if [ -n "$TEMP_TABLESPACE" ]; then
+            COMMAND_OUTPUT=$(cargo run --release --bin sort-postgres -- \
+                --db "$DB_CONNECTION" \
+                --table "$TABLE" \
+                --total-memory "$MEM" \
+                --parallel-workers "$PARALLEL_WORKERS" \
+                --temp-tablespace "$TEMP_TABLESPACE" \
+                --output "$OUTPUT" 2>&1)
+        else
+            COMMAND_OUTPUT=$(cargo run --release --bin sort-postgres -- \
+                --db "$DB_CONNECTION" \
+                --table "$TABLE" \
+                --total-memory "$MEM" \
+                --parallel-workers "$PARALLEL_WORKERS" \
+                --output "$OUTPUT" 2>&1)
+        fi
+    else
+        # Count mode
+        if [ -n "$TEMP_TABLESPACE" ]; then
+            COMMAND_OUTPUT=$(cargo run --release --bin sort-postgres -- \
+                --db "$DB_CONNECTION" \
+                --table "$TABLE" \
+                --total-memory "$MEM" \
+                --parallel-workers "$PARALLEL_WORKERS" \
+                --temp-tablespace "$TEMP_TABLESPACE" 2>&1)
+        else
+            COMMAND_OUTPUT=$(cargo run --release --bin sort-postgres -- \
+                --db "$DB_CONNECTION" \
+                --table "$TABLE" \
+                --total-memory "$MEM" \
+                --parallel-workers "$PARALLEL_WORKERS" 2>&1)
+        fi
+    fi
     EXIT_CODE=$?
     set -e
 
-    echo "$OUTPUT"
+    echo "$COMMAND_OUTPUT"
+
+    # Clear PostgreSQL's internal caches
+    echo "Clearing PostgreSQL caches..."
+    psql "$DB_CONNECTION" -c "DISCARD ALL" >/dev/null 2>&1 || true
 
     # Extract timing from output
-    DURATION=$(echo "$OUTPUT" | grep "TIMING:" | awk '{print $2}')
+    DURATION=$(echo "$COMMAND_OUTPUT" | grep "TIMING:" | awk '{print $2}')
 
     # Write detailed log to individual file
     {
@@ -108,7 +158,7 @@ for MEM in $MEMORY_LIMITS; do
         echo "========================================="
         echo "Full output:"
         echo "========================================="
-        echo "$OUTPUT"
+        echo "$COMMAND_OUTPUT"
         echo ""
         echo "========================================="
         echo "Summary:"
@@ -130,6 +180,22 @@ for MEM in $MEMORY_LIMITS; do
         echo "Warning: Could not extract timing information"
     fi
 
+    # Clean up binary output file if it exists
+    if [ -n "$OUTPUT" ] && [ -f "$OUTPUT" ]; then
+        echo "Cleaning up output file..."
+        OUTPUT_SIZE=$(du -sh "$OUTPUT" 2>/dev/null | cut -f1 || echo "unknown")
+        echo "Output file size: $OUTPUT_SIZE"
+        # Truncate first in case file is still open
+        > "$OUTPUT"
+        rm -f "$OUTPUT"
+        sync
+        echo "Output file removed and synced."
+    fi
+
+    echo ""
+    echo "Waiting 30 seconds before next run..."
+    sync
+    sleep 30
     echo ""
 done
 

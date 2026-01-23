@@ -95,21 +95,23 @@ Environment variables:
 - `THREAD_COUNTS` - Thread counts to test (default: "4 8 16 24 32 40 44")
 
 #### `sweep_duckdb_memory.sh`
-Vary memory limit (1GB, 4GB, 6GB, 8GB, 16GB, 24GB, 32GB) at fixed thread count
+Vary memory limit (1GB, 2GB, 4GB, 8GB, 16GB, 32GB) at fixed thread count
 
 ```bash
 ./scripts/sweep_duckdb_memory.sh
 ```
 
 Environment variables:
-- `THREADS` - Fixed thread count (default: 16)
-- `MEMORY_LIMITS` - Memory limits to test (default: "1GB 4GB 6GB 8GB 16GB 24GB 32GB")
+- `THREADS` - Fixed thread count (default: 40)
+- `MEMORY_LIMITS` - Memory limits to test (default: "1GB 2GB 4GB 8GB 16GB 32GB")
+- `TEMP_DIR` - Temporary directory for DuckDB spilling (default: ./duckdb_temp)
+- `OUTPUT` - Optional output file path for Parquet mode (default: count mode)
 - Other variables same as parallelism sweep
 
 ### PostgreSQL Sweeps
 
 #### `sweep_postgres_parallelism.sh`
-Vary parallel worker count (4, 8, 16, 24, 32, 40, 44) at fixed work_mem
+Vary parallel worker count (4, 8, 16, 24, 32, 40, 44) at fixed total memory budget. The total memory is divided by the number of workers to calculate work_mem per worker.
 
 ```bash
 ./scripts/sweep_postgres_parallelism.sh
@@ -120,20 +122,24 @@ Environment variables:
 - `FORMAT` - Input format (default: gensort)
 - `DB_CONNECTION` - PostgreSQL connection string (default: postgres://localhost/bench)
 - `TABLE` - Table name (default: bench_data)
-- `OUTPUT_BASE` - Output file base (default: /tmp/postgres_sorted)
-- `WORK_MEM` - Fixed work_mem (default: 2GB)
+- `TOTAL_MEMORY` - Fixed total memory budget (default: 2GB). Also supports `WORK_MEM` for backward compatibility
 - `WORKER_COUNTS` - Worker counts to test (default: "4 8 16 24 32 40 44")
+- `TEMP_TABLESPACE` - Optional PostgreSQL tablespace for spilling temp files
+- `OUTPUT` - Optional output file path for binary COPY mode (default: count mode)
+- `TIMEOUT_SECONDS` - Timeout per run in seconds (default: 7200 = 2 hours)
 
 #### `sweep_postgres_memory.sh`
-Vary work_mem (1GB, 4GB, 6GB, 8GB, 16GB, 24GB, 32GB) at fixed parallel worker count
+Vary total memory budget (1GB, 4GB, 6GB, 8GB, 16GB, 24GB, 32GB) at fixed parallel worker count. The total memory is divided by the number of workers to calculate work_mem per worker.
 
 ```bash
 ./scripts/sweep_postgres_memory.sh
 ```
 
 Environment variables:
-- `PARALLEL_WORKERS` - Fixed parallel worker count (default: 16)
-- `MEMORY_LIMITS` - Memory limits to test (default: "1GB 4GB 6GB 8GB 16GB 24GB 32GB")
+- `PARALLEL_WORKERS` - Fixed parallel worker count (default: 40). Creates PARALLEL_WORKERS + 1 total processes, but memory is divided by PARALLEL_WORKERS
+- `MEMORY_LIMITS` - Total memory budgets to test (default: "1GB 2GB 4GB 8GB 16GB 32GB")
+- `TEMP_TABLESPACE` - Optional PostgreSQL tablespace for spilling temp files
+- `OUTPUT` - Optional output file path for binary COPY mode (default: count mode)
 - Other variables same as parallelism sweep
 
 ### Custom Sweep Example
@@ -161,3 +167,4 @@ MEMORY_LIMITS="512MB 1GB 2GB 4GB" \
 - All scripts use `sync` to flush filesystem buffers (sudo not required)
 - DuckDB exports to Parquet format, PostgreSQL exports to binary COPY format
 - Release builds are used for optimal performance
+- **PostgreSQL Parallelism**: When you specify `--parallel-workers=N`, PostgreSQL creates N worker processes + 1 leader process, for a total of N+1 processes. The `total_memory` budget is divided by N to calculate `work_mem` per worker. For example, `--parallel-workers=40` with `--total-memory=2GB` results in 41 total processes (40 workers + 1 leader), with work_mem set to 2GB/40 = ~51MB per worker.

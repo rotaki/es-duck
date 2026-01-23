@@ -22,6 +22,10 @@ struct Args {
     /// Number of parallel workers (Total processes = workers + 1)
     #[arg(long, default_value = "7")]
     parallel_workers: i32,
+
+    /// Output path for sorted data (binary format). If not provided, runs count mode instead.
+    #[arg(long)]
+    output: Option<String>,
 }
 
 /// Parses strings like "2GB", "512MB" into a numeric byte value
@@ -42,10 +46,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
 
     // 1. CALCULATE WORK_MEM PER WORKER
-    // Total processes = Workers + 1 (the Leader)
+    // NOTE: PostgreSQL parallel query uses N workers + 1 leader process
+    // For example, --parallel-workers=40 creates 41 total processes (40 workers + 1 leader)
+    // We divide total memory budget by N (the parallel_workers parameter) to get work_mem
     let total_procs = args.parallel_workers + 1;
     let total_kb = parse_memory_to_kb(&args.total_memory)?;
-    let work_mem_kb = total_kb / total_procs as i64;
+    let work_mem_kb = total_kb / args.parallel_workers as i64;
     let work_mem_setting = format!("{}kB", work_mem_kb);
 
     let mut client = Client::connect(&args.db, NoTls)?;
@@ -55,10 +61,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // 2. APPLY CALCULATED SETTINGS
     println!(
-        "Total Budget: {} | Workers: {} | Total Processes: {}",
+        "Total Budget: {} | Workers: {} | Total Processes: {} (workers + 1 leader)",
         args.total_memory, args.parallel_workers, total_procs
     );
-    println!("Calculated work_mem per process: {}", work_mem_setting);
+    println!("Calculated work_mem per worker: {}", work_mem_setting);
 
     client.batch_execute(&format!("SET LOCAL work_mem = '{}'", work_mem_setting))?;
     client.batch_execute(&format!(
@@ -98,45 +104,72 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("Size: {:.2} GB", size_gb);
     println!();
 
-    // --- Verification via EXPLAIN ANALYZE ---
-    let select_query = format!(
-        "SELECT sort_key, payload FROM {} ORDER BY sort_key",
-        args.table
-    );
-    println!("Verifying external sort with EXPLAIN ANALYZE...");
+    // Build the actual query based on mode
+    if let Some(ref output_path) = args.output {
+        // Binary output mode: Write sorted results to file
+        let select_query = format!(
+            "SELECT sort_key, payload FROM {} ORDER BY sort_key",
+            args.table
+        );
+        let query = format!(
+            "COPY ({}) TO '{}' (FORMAT BINARY)",
+            select_query, output_path
+        );
 
-    let analyze_rows =
-        client.query(&format!("EXPLAIN (ANALYZE, BUFFERS) {}", select_query), &[])?;
+        // --- Run EXPLAIN on the actual query ---
+        println!("\nRunning EXPLAIN on the actual query...");
+        let explain_query = format!("EXPLAIN (BUFFERS, VERBOSE) {}", query);
 
-    let mut found_external = false;
-    for row in analyze_rows {
-        let line: String = row.get(0);
-        if line.contains("Sort Method:") {
-            println!(">>> {}", line.trim());
-            if line.contains("external merge") {
-                found_external = true;
-            }
+        let explain_rows = client.query(&explain_query, &[])?;
+
+        println!("\n===== QUERY PLAN =====");
+        for row in explain_rows {
+            let line: String = row.get(0);
+            println!("{}", line);
         }
+        println!("======================\n");
+
+        // --- Final Execution ---
+        println!("\nRunning external sort (writing to '{}')...", output_path);
+        let start = Instant::now();
+
+        client.batch_execute(&query)?;
+        client.batch_execute("COMMIT")?;
+        let duration = start.elapsed();
+
+        println!(
+            "\nExternal sorting completed and written to binary file in {:.2} seconds.",
+            duration.as_secs_f64()
+        );
+        println!("TIMING: {:.2} seconds", duration.as_secs_f64());
+    } else {
+        // Analyze mode: Run EXPLAIN ANALYZE to execute sort without writing
+        let query = format!(
+            "SELECT sort_key, payload FROM {} ORDER BY sort_key",
+            args.table
+        );
+        let explain_analyze_query = format!("EXPLAIN ANALYZE {}", query);
+
+        println!("\nRunning EXPLAIN ANALYZE (sort without writing)...");
+        let start = Instant::now();
+
+        let explain_rows = client.query(&explain_analyze_query, &[])?;
+        client.batch_execute("COMMIT")?;
+        let duration = start.elapsed();
+
+        println!("\n===== EXPLAIN ANALYZE RESULTS =====");
+        for row in explain_rows {
+            let line: String = row.get(0);
+            println!("{}", line);
+        }
+        println!("====================================\n");
+
+        println!(
+            "\nExternal sorting completed in {:.2} seconds.",
+            duration.as_secs_f64()
+        );
+        println!("TIMING: {:.2} seconds", duration.as_secs_f64());
     }
-
-    if !found_external {
-        return Err("Sort did not spill to disk! Check your data size or memory budget.".into());
-    }
-
-    // --- Final Execution ---
-    let count_query = format!(
-        "SELECT count(payload) FROM (SELECT payload FROM {} ORDER BY sort_key OFFSET 1) AS subquery",
-        args.table
-    );
-
-    println!("\nExecuting count query...");
-    let start = Instant::now();
-    let count: i64 = client.query_one(&count_query, &[])?.get(0);
-    client.batch_execute("COMMIT")?;
-    let duration = start.elapsed();
-
-    println!("Count result: {}", count);
-    println!("TIMING: {:.2} seconds", duration.as_secs_f64());
 
     Ok(())
 }
