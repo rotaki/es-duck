@@ -1,6 +1,7 @@
 use clap::Parser;
 use postgres::{Client, NoTls};
 use std::error::Error;
+use std::path::PathBuf;
 use std::time::Instant;
 
 #[derive(Parser)]
@@ -100,13 +101,24 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Build the actual query based on mode
     if let Some(ref output_path) = args.output {
         // Binary output mode: Write sorted results to file
+        // Convert to absolute path (PostgreSQL requires absolute paths for COPY TO FILE)
+        let absolute_path = if PathBuf::from(output_path).is_absolute() {
+            output_path.to_string()
+        } else {
+            std::env::current_dir()?
+                .join(output_path)
+                .to_str()
+                .ok_or("Invalid path")?
+                .to_string()
+        };
+
         let select_query = format!(
             "SELECT sort_key, payload FROM {} ORDER BY sort_key",
             args.table
         );
         let query = format!(
             "COPY ({}) TO '{}' (FORMAT BINARY)",
-            select_query, output_path
+            select_query, absolute_path
         );
 
         // --- Run EXPLAIN on the SELECT query (COPY cannot be EXPLAINed) ---
@@ -123,7 +135,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!("======================\n");
 
         // --- Final Execution ---
-        println!("\nRunning external sort (writing to '{}')...", output_path);
+        println!(
+            "\nRunning external sort (writing to '{}')...",
+            absolute_path
+        );
         let start = Instant::now();
 
         client.batch_execute(&query)?;
