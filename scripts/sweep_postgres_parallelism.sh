@@ -16,7 +16,6 @@ TOTAL_MEMORY="${TOTAL_MEMORY:-${WORK_MEM:-2GB}}"
 # WORKER_COUNTS="${WORKER_COUNTS:-4 8 16 24 32 40 44}"
 WORKER_COUNTS="${WORKER_COUNTS:-4}"
 LOG_DIR="${LOG_DIR:-./logs/postgres_parallelism_sweep_${SWEEP_TIMESTAMP}}"
-TEMP_TABLESPACE="${TEMP_TABLESPACE:-}"  # Optional temp tablespace for spilling
 OUTPUT="${OUTPUT:-}"  # Optional output path for binary mode
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-7200}"  # 2 hour default timeout
 
@@ -29,9 +28,6 @@ echo "Total memory budget: $TOTAL_MEMORY"
 echo "Worker counts: $WORKER_COUNTS"
 echo "Timeout: ${TIMEOUT_SECONDS}s"
 echo "Log directory: $LOG_DIR"
-if [ -n "$TEMP_TABLESPACE" ]; then
-    echo "Temp tablespace: $TEMP_TABLESPACE"
-fi
 if [ -n "$OUTPUT" ]; then
     echo "Mode: Binary output to $OUTPUT"
 else
@@ -98,38 +94,19 @@ for W in $WORKER_COUNTS; do
             sync
         fi
 
-        if [ -n "$TEMP_TABLESPACE" ]; then
-            COMMAND_OUTPUT=$(timeout $TIMEOUT_SECONDS cargo run --release --bin sort-postgres -- \
-                --db "$DB_CONNECTION" \
-                --table "$TABLE" \
-                --total-memory "$TOTAL_MEMORY" \
-                --parallel-workers "$W" \
-                --temp-tablespace "$TEMP_TABLESPACE" \
-                --output "$OUTPUT" 2>&1)
-        else
-            COMMAND_OUTPUT=$(timeout $TIMEOUT_SECONDS cargo run --release --bin sort-postgres -- \
-                --db "$DB_CONNECTION" \
-                --table "$TABLE" \
-                --total-memory "$TOTAL_MEMORY" \
-                --parallel-workers "$W" \
-                --output "$OUTPUT" 2>&1)
-        fi
+        COMMAND_OUTPUT=$(timeout $TIMEOUT_SECONDS cargo run --release --bin sort-postgres -- \
+            --db "$DB_CONNECTION" \
+            --table "$TABLE" \
+            --total-memory "$TOTAL_MEMORY" \
+            --parallel-workers "$W" \
+            --output "$OUTPUT" 2>&1)
     else
         # Count mode
-        if [ -n "$TEMP_TABLESPACE" ]; then
-            COMMAND_OUTPUT=$(timeout $TIMEOUT_SECONDS cargo run --release --bin sort-postgres -- \
-                --db "$DB_CONNECTION" \
-                --table "$TABLE" \
-                --total-memory "$TOTAL_MEMORY" \
-                --parallel-workers "$W" \
-                --temp-tablespace "$TEMP_TABLESPACE" 2>&1)
-        else
-            COMMAND_OUTPUT=$(timeout $TIMEOUT_SECONDS cargo run --release --bin sort-postgres -- \
-                --db "$DB_CONNECTION" \
-                --table "$TABLE" \
-                --total-memory "$TOTAL_MEMORY" \
-                --parallel-workers "$W" 2>&1)
-        fi
+        COMMAND_OUTPUT=$(timeout $TIMEOUT_SECONDS cargo run --release --bin sort-postgres -- \
+            --db "$DB_CONNECTION" \
+            --table "$TABLE" \
+            --total-memory "$TOTAL_MEMORY" \
+            --parallel-workers "$W" 2>&1)
     fi
     EXIT_CODE=$?
     set -e

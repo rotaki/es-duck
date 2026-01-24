@@ -16,9 +16,6 @@ struct Args {
     #[arg(long, default_value = "2GB")]
     total_memory: String,
 
-    #[arg(long)]
-    temp_tablespace: Option<String>,
-
     /// Number of parallel workers (Total processes = workers + 1)
     #[arg(long, default_value = "7")]
     parallel_workers: i32,
@@ -78,10 +75,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     client.batch_execute("SET LOCAL min_parallel_table_scan_size = '0'")?;
     client.batch_execute("SET LOCAL enable_parallel_append = on")?;
     client.batch_execute("SET LOCAL temp_file_limit = -1")?;
-
-    if let Some(ref ts) = args.temp_tablespace {
-        client.batch_execute(&format!("SET LOCAL temp_tablespaces = '{}'", ts))?;
-    }
 
     // --- Gather and print table statistics ---
     println!("\nGathering table statistics...");
