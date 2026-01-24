@@ -109,9 +109,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             select_query, output_path
         );
 
-        // --- Run EXPLAIN on the actual query ---
-        println!("\nRunning EXPLAIN on the actual query...");
-        let explain_query = format!("EXPLAIN (BUFFERS, VERBOSE) {}", query);
+        // --- Run EXPLAIN on the SELECT query (COPY cannot be EXPLAINed) ---
+        println!("\nRunning EXPLAIN on the SELECT query...");
+        let explain_query = format!("EXPLAIN (BUFFERS, VERBOSE) {}", select_query);
 
         let explain_rows = client.query(&explain_query, &[])?;
 
