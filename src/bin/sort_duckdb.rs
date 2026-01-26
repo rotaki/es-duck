@@ -28,7 +28,7 @@ struct Args {
     #[arg(long)]
     threads: Option<usize>,
 
-    /// Output path for sorted data (parquet format). If not provided, runs count mode instead.
+    /// Output path for sorted data (parquet format). If not provided, runs analyze mode instead.
     #[arg(long)]
     output: Option<PathBuf>,
 }
@@ -82,43 +82,41 @@ fn main() -> Result<(), Box<dyn Error>> {
         table_size_bytes,
         table_size_bytes as f64 / 1_073_741_824.0
     );
+    // Quote table name as an identifier: "foo""bar"
+    let table = format!("\"{}\"", args.table.replace('"', "\"\""));
+    let select_query = format!("SELECT sort_key, payload FROM {} ORDER BY sort_key", table);
 
     // Build the actual query that will be executed based on mode
     let (query, mode_description) = if let Some(output_path) = &args.output {
-        // Parquet mode: Write sorted results to file
-        let select_query = format!(
-            "SELECT sort_key, payload FROM {} ORDER BY sort_key",
-            args.table
+        let path = output_path.display().to_string().replace('\'', "''");
+        let copy_query = format!(
+            "COPY ({}) TO '{}' (FORMAT PARQUET, PRESERVE_ORDER true)",
+            select_query, path
         );
-        let query = format!(
-            r#"COPY ({}) TO '{}' (FORMAT PARQUET, PRESERVE_ORDER true);"#,
-            select_query,
-            output_path.display()
-        );
-        (query, format!("writing to '{}'", output_path.display()))
+        (
+            copy_query,
+            format!("writing to '{}'", output_path.display()),
+        )
     } else {
-        // Count mode: Just run count to trigger sort without writing
-        let query = format!(
-            r#"SELECT count(payload)
-FROM (SELECT payload
-FROM {}
-ORDER BY sort_key
-OFFSET 1);"#,
-            args.table
-        );
-        (query, format!("count mode on '{}'", args.table))
+        let analyze_query = format!("EXPLAIN ANALYZE {}", select_query);
+        (analyze_query, format!("analyze mode on '{}'", args.table))
     };
 
-    // Run EXPLAIN to see the query plan for the actual query
-    println!("\nRunning EXPLAIN on the actual query...");
-    let explain_query = format!("EXPLAIN {}", query);
+    // Always print the sort-only plan (useful for both modes)
+    {
+        let explain_sort = format!("EXPLAIN {}", select_query);
+        let mut stmt = conn.prepare(&explain_sort)?;
+        let mut rows = stmt.query([])?;
 
-    // Execute EXPLAIN and get the plan as a string
-    let plan_result: String = conn.query_row(&explain_query, [], |row| row.get(1))?;
-
-    println!("\n===== QUERY PLAN =====");
-    println!("{}", plan_result);
-    println!("======================\n");
+        println!("\n===== SORT-ONLY EXPLAIN PLAN =====");
+        while let Some(row) = rows.next()? {
+            // DuckDB EXPLAIN commonly returns (explain_key, explain_value)
+            // If it’s 1-col in your build, change get(1) -> get(0).
+            let result: String = row.get(1)?;
+            println!("{}", result);
+        }
+        println!("=================================\n");
+    }
 
     // Execute the query
     println!("Running external sort ({})...", mode_description);
@@ -128,24 +126,32 @@ OFFSET 1);"#,
     if args.output.is_some() {
         // Parquet mode: execute the COPY statement
         conn.execute(&query, [])?;
-        let duration = start.elapsed();
-
-        println!(
-            "\nExternal sorting completed and written to parquet in {:.2} seconds.",
-            duration.as_secs_f64()
-        );
-        println!("TIMING: {:.2}", duration.as_secs_f64());
     } else {
-        // Count mode: execute the SELECT and get the count
-        let count: i64 = conn.query_row(&query, [], |row| row.get(0))?;
-        let duration = start.elapsed();
+        // Analyze mode: execute EXPLAIN ANALYZE and collect results (don’t print during timing)
+        let mut stmt = conn.prepare(&query)?;
+        let mut rows = stmt.query([])?;
 
-        println!(
-            "\nExternal sorting completed in {:.2} seconds.",
-            duration.as_secs_f64()
-        );
-        println!("Count result: {}", count);
+        let mut explain_lines: Vec<String> = Vec::new();
+        while let Some(row) = rows.next()? {
+            let line: String = row.get(1)?; // if 1-col output, use get(0)
+            explain_lines.push(line);
+        }
+
+        let duration = start.elapsed();
         println!("TIMING: {:.2}", duration.as_secs_f64());
+
+        // Print after timing to avoid stdout overhead in the measurement
+        println!("\n===== EXPLAIN ANALYZE RESULTS =====");
+        for line in explain_lines {
+            println!("{}", line);
+        }
+        println!("====================================\n");
+
+        // early return so we don’t print TIMING twice
+        return Ok(());
     }
+
+    let duration = start.elapsed();
+    println!("TIMING: {:.2}", duration.as_secs_f64());
     Ok(())
 }
