@@ -42,7 +42,7 @@ mkdir -p "$TEMP_DIR"
 # Load database if it doesn't exist
 if [ ! -f "$DB_FILE" ]; then
     echo "Loading data into DuckDB..."
-    cargo run --release --bin load-duckdb -- \
+    cargo run --release --bin load-duckdb --features db-duckdb -- \
         --format "$FORMAT" \
         --input "$INPUT_FILE" \
         --db "$DB_FILE" \
@@ -75,7 +75,7 @@ for MEM in $MEMORY_LIMITS; do
             sync
         fi
 
-        COMMAND_OUTPUT=$(cargo run --release --bin sort-duckdb -- \
+        COMMAND_OUTPUT=$(cargo run --release --bin sort-duckdb --features db-duckdb -- \
             --db "$DB_FILE" \
             --table "$TABLE" \
             --memory-limit "$MEM" \
@@ -84,7 +84,7 @@ for MEM in $MEMORY_LIMITS; do
             --output "$OUTPUT" 2>&1)
     else
         # Count mode
-        COMMAND_OUTPUT=$(cargo run --release --bin sort-duckdb -- \
+        COMMAND_OUTPUT=$(cargo run --release --bin sort-duckdb --features db-duckdb -- \
             --db "$DB_FILE" \
             --table "$TABLE" \
             --memory-limit "$MEM" \

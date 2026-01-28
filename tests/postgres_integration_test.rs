@@ -1,3 +1,5 @@
+#![cfg(feature = "db-postgres")]
+
 use postgres::{Client, NoTls};
 use std::process::Command;
 

@@ -4,29 +4,61 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# Common dependencies used by all binaries
 clap = { version = "4.5", features = ["derive"] }
-duckdb = { version = "1.4.3", features = ["bundled"] }
-postgres = "0.19"
-rand = "0.9"
+serde = { version = "1", features = ["derive"] }
+
+# Database-specific dependencies (optional)
+clickhouse = { version = "0.14", optional = true }
+duckdb = { version = "1.4.3", features = ["bundled"], optional = true }
+postgres = { version = "0.19", optional = true }
+
+# Utility dependencies (optional)
+rand = { version = "0.9", optional = true }
+reqwest = { version = "0.12", features = ["stream"], optional = true }
+tokio = { version = "1", features = ["full"], optional = true }
+tokio-util = { version = "0.7", features = ["io", "io-util", "compat"], optional = true }
+
+[features]
+default = []
+db-clickhouse = ["dep:clickhouse", "dep:tokio", "dep:reqwest", "dep:tokio-util"]
+db-duckdb = ["dep:duckdb"]
+db-postgres = ["dep:postgres"]
+util-rand = ["dep:rand"]
 
 [[bin]]
 name = "load-duckdb"
 path = "src/bin/load_duckdb.rs"
+required-features = ["db-duckdb"]
 
 [[bin]]
 name = "load-postgres"
 path = "src/bin/load_postgres.rs"
+required-features = ["db-postgres"]
+
+[[bin]]
+name = "load-clickhouse"
+path = "src/bin/load_clickhouse.rs"
+required-features = ["db-clickhouse"]
 
 [[bin]]
 name = "sort-duckdb"
 path = "src/bin/sort_duckdb.rs"
+required-features = ["db-duckdb"]
 
 [[bin]]
 name = "sort-postgres"
 path = "src/bin/sort_postgres.rs"
+required-features = ["db-postgres"]
+
+[[bin]]
+name = "sort-clickhouse"
+path = "src/bin/sort_clickhouse.rs"
+required-features = ["db-clickhouse"]
 
 [[bin]]
 name = "generate-gensort"
 path = "src/bin/generate_gensort.rs"
+required-features = ["util-rand"]
 
 [dev-dependencies]

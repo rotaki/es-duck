@@ -1,3 +1,5 @@
+#![cfg(feature = "db-duckdb")]
+
 use duckdb::Connection;
 use std::fs;
 use std::process::Command;

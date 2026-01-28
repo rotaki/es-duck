@@ -47,7 +47,7 @@ if [ ! -f "$DB_FILE" ]; then
     echo "Loading data into DuckDB..."
     echo "NOTE: This will show output in real-time..."
 
-    timeout $TIMEOUT_SECONDS cargo run --release --bin load-duckdb -- \
+    timeout $TIMEOUT_SECONDS cargo run --release --bin load-duckdb --features db-duckdb -- \
         --format "$FORMAT" \
         --input "$INPUT_FILE" \
         --db "$DB_FILE" \
@@ -91,7 +91,7 @@ for T in $THREAD_COUNTS; do
             sync
         fi
 
-        timeout $TIMEOUT_SECONDS cargo run --release --bin sort-duckdb -- \
+        timeout $TIMEOUT_SECONDS cargo run --release --bin sort-duckdb --features db-duckdb -- \
             --db "$DB_FILE" \
             --table "$TABLE" \
             --memory-limit "$MEMORY_LIMIT" \
@@ -100,7 +100,7 @@ for T in $THREAD_COUNTS; do
             --output "$OUTPUT" 2>&1 | tee "$TEMP_OUTPUT"
     else
         # Count mode
-        timeout $TIMEOUT_SECONDS cargo run --release --bin sort-duckdb -- \
+        timeout $TIMEOUT_SECONDS cargo run --release --bin sort-duckdb --features db-duckdb -- \
             --db "$DB_FILE" \
             --table "$TABLE" \
             --memory-limit "$MEMORY_LIMIT" \

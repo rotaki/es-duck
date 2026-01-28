@@ -58,7 +58,7 @@ TABLE_EXISTS=$(psql "$DB_CONNECTION" -tAc "SELECT EXISTS (SELECT FROM informatio
 # Load database if table doesn't exist
 if [ "$TABLE_EXISTS" = "f" ]; then
     echo "Loading data into PostgreSQL..."
-    cargo run --release --bin load-postgres -- \
+    cargo run --release --bin load-postgres --features db-postgres -- \
         --format "$FORMAT" \
         --input "$INPUT_FILE" \
         --db "$DB_CONNECTION" \
@@ -93,7 +93,7 @@ for MEM in $MEMORY_LIMITS; do
         fi
 
         if [ -n "$TEMP_TABLESPACE" ]; then
-            COMMAND_OUTPUT=$(cargo run --release --bin sort-postgres -- \
+            COMMAND_OUTPUT=$(cargo run --release --bin sort-postgres --features db-postgres -- \
                 --db "$DB_CONNECTION" \
                 --table "$TABLE" \
                 --total-memory "$MEM" \
@@ -101,7 +101,7 @@ for MEM in $MEMORY_LIMITS; do
                 --temp-tablespace "$TEMP_TABLESPACE" \
                 --output "$OUTPUT" 2>&1)
         else
-            COMMAND_OUTPUT=$(cargo run --release --bin sort-postgres -- \
+            COMMAND_OUTPUT=$(cargo run --release --bin sort-postgres --features db-postgres -- \
                 --db "$DB_CONNECTION" \
                 --table "$TABLE" \
                 --total-memory "$MEM" \
@@ -111,14 +111,14 @@ for MEM in $MEMORY_LIMITS; do
     else
         # Count mode
         if [ -n "$TEMP_TABLESPACE" ]; then
-            COMMAND_OUTPUT=$(cargo run --release --bin sort-postgres -- \
+            COMMAND_OUTPUT=$(cargo run --release --bin sort-postgres --features db-postgres -- \
                 --db "$DB_CONNECTION" \
                 --table "$TABLE" \
                 --total-memory "$MEM" \
                 --parallel-workers "$PARALLEL_WORKERS" \
                 --temp-tablespace "$TEMP_TABLESPACE" 2>&1)
         else
-            COMMAND_OUTPUT=$(cargo run --release --bin sort-postgres -- \
+            COMMAND_OUTPUT=$(cargo run --release --bin sort-postgres --features db-postgres -- \
                 --db "$DB_CONNECTION" \
                 --table "$TABLE" \
                 --total-memory "$MEM" \

@@ -8,4 +8,13 @@
 # Local DuckDB installation
 /scripts/duckdb/
 
+# Local ClickHouse installation
+/scripts/clickhouse-bin/
+/scripts/clickhouse-data/
+/scripts/clickhouse.log
+/scripts/preprocessed_configs/
+/scripts/clickhouse.pid
+stderr.log
+stdout.log
+
 /testdata/test_gensort_*
