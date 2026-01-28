@@ -46,13 +46,6 @@ struct Args {
     output: Option<PathBuf>,
 }
 
-#[derive(clickhouse::Row, serde::Deserialize)]
-#[allow(dead_code)]
-struct ClickhouseRow {
-    sort_key: String,
-    payload: String,
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
@@ -98,6 +91,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         settings.push(format!("max_threads = {}", threads));
     }
     settings.push(format!("max_bytes_before_external_sort = {}", max_bytes));
+    settings.push(format!("max_bytes_ratio_before_external_sort = 0"));
     println!(
         "Setting max_bytes_before_external_sort to {} bytes",
         max_bytes
