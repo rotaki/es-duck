@@ -25,29 +25,37 @@ if [[ ! -x "${CLICKHOUSE_BIN_DIR}/clickhouse" ]]; then
     exit 1
   fi
 
-  echo "Downloading ${TAG_NAME}..."
+  # Extract version number from tag (remove "v" prefix and "-stable" suffix)
+  VERSION="${TAG_NAME#v}"
+  VERSION="${VERSION%-stable}"
+
+  echo "Downloading ${TAG_NAME} (version ${VERSION})..."
   mkdir -p "${CLICKHOUSE_BIN_DIR}"
 
   OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
   ARCH="$(uname -m)"
 
-  # Determine the correct binary name based on OS and architecture
+  # Determine the correct asset name based on OS and architecture
   if [[ "$OS" == "darwin" ]]; then
-    # macOS binaries use "macos" prefix
+    # macOS has direct binaries
     if [[ "$ARCH" == "arm64" || "$ARCH" == "aarch64" ]]; then
-      BINARY_NAME="clickhouse-macos-aarch64"
+      ASSET_NAME="clickhouse-macos-aarch64"
+      IS_TARBALL=false
     elif [[ "$ARCH" == "x86_64" ]]; then
-      BINARY_NAME="clickhouse-macos"
+      ASSET_NAME="clickhouse-macos"
+      IS_TARBALL=false
     else
       echo "Unsupported macOS architecture: $ARCH" >&2
       exit 1
     fi
   elif [[ "$OS" == "linux" ]]; then
-    # Linux binaries use "linux" prefix
+    # Linux has tarballs (clickhouse-common-static contains the binary)
     if [[ "$ARCH" == "x86_64" ]]; then
-      BINARY_NAME="clickhouse-linux-amd64"
+      ASSET_NAME="clickhouse-common-static-${VERSION}-amd64.tgz"
+      IS_TARBALL=true
     elif [[ "$ARCH" == "arm64" || "$ARCH" == "aarch64" ]]; then
-      BINARY_NAME="clickhouse-linux-aarch64"
+      ASSET_NAME="clickhouse-common-static-${VERSION}-arm64.tgz"
+      IS_TARBALL=true
     else
       echo "Unsupported Linux architecture: $ARCH" >&2
       exit 1
@@ -57,10 +65,21 @@ if [[ ! -x "${CLICKHOUSE_BIN_DIR}/clickhouse" ]]; then
     exit 1
   fi
 
-  URL="https://github.com/ClickHouse/ClickHouse/releases/download/${TAG_NAME}/${BINARY_NAME}"
+  URL="https://github.com/ClickHouse/ClickHouse/releases/download/${TAG_NAME}/${ASSET_NAME}"
 
   echo "Downloading from ${URL}..."
-  curl -f -L -o "${CLICKHOUSE_BIN_DIR}/clickhouse" "${URL}"
+
+  if [[ "$IS_TARBALL" == true ]]; then
+    # Download and extract tarball
+    curl -f -L -o "${CLICKHOUSE_BIN_DIR}/${ASSET_NAME}" "${URL}"
+    echo "Extracting ClickHouse binary..."
+    tar -xzf "${CLICKHOUSE_BIN_DIR}/${ASSET_NAME}" -C "${CLICKHOUSE_BIN_DIR}" --strip-components=2 usr/bin/clickhouse
+    rm "${CLICKHOUSE_BIN_DIR}/${ASSET_NAME}"
+  else
+    # Download direct binary (macOS)
+    curl -f -L -o "${CLICKHOUSE_BIN_DIR}/clickhouse" "${URL}"
+  fi
+
   chmod +x "${CLICKHOUSE_BIN_DIR}/clickhouse"
   echo "ClickHouse installed successfully!"
 fi
