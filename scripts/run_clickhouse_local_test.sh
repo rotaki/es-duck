@@ -73,7 +73,7 @@ if [[ ! -x "${CLICKHOUSE_BIN_DIR}/clickhouse" ]]; then
     # Download and extract tarball
     curl -f -L -o "${CLICKHOUSE_BIN_DIR}/${ASSET_NAME}" "${URL}"
     echo "Extracting ClickHouse binary..."
-    tar -xzf "${CLICKHOUSE_BIN_DIR}/${ASSET_NAME}" -C "${CLICKHOUSE_BIN_DIR}" --strip-components=2 usr/bin/clickhouse
+    tar -xzf "${CLICKHOUSE_BIN_DIR}/${ASSET_NAME}" -C "${CLICKHOUSE_BIN_DIR}" --strip-components=3 "*/usr/bin/clickhouse"
     rm "${CLICKHOUSE_BIN_DIR}/${ASSET_NAME}"
   else
     # Download direct binary (macOS)
