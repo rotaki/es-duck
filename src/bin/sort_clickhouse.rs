@@ -96,8 +96,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "Setting max_bytes_before_external_sort to {} bytes",
         max_bytes
     );
-    settings.push(format!("max_memory_usage = {}", max_bytes * 2));
-    println!("Setting max_memory_usage to {} bytes", max_bytes * 2);
+    // settings.push(format!("max_memory_usage = {}", max_bytes * 2));
+    // println!("Setting max_memory_usage to {} bytes", max_bytes * 2);
 
     let settings_clause = if settings.is_empty() {
         String::new()
