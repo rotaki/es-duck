@@ -18,10 +18,11 @@ rand = { version = "0.9", optional = true }
 reqwest = { version = "0.12", features = ["stream"], optional = true }
 tokio = { version = "1", features = ["full"], optional = true }
 tokio-util = { version = "0.7", features = ["io", "io-util", "compat"], optional = true }
+uuid = { version = "1", features = ["v4"], optional = true }
 
 [features]
 default = []
-db-clickhouse = ["dep:clickhouse", "dep:tokio", "dep:reqwest", "dep:tokio-util"]
+db-clickhouse = ["dep:clickhouse", "dep:tokio", "dep:reqwest", "dep:tokio-util", "dep:uuid"]
 db-duckdb = ["dep:duckdb"]
 db-postgres = ["dep:postgres"]
 util-rand = ["dep:rand"]

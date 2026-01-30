@@ -1,5 +1,6 @@
 #!/bin/bash
 # PostgreSQL memory sweep: vary work_mem at fixed parallel worker count
+# FIXED VERSION: Shows real-time output and has timeout protection
 
 set -e
 
@@ -15,6 +16,9 @@ PARALLEL_WORKERS="${PARALLEL_WORKERS:-40}"
 # MEMORY_LIMITS="${MEMORY_LIMITS:-1GB 4GB 6GB 8GB 16GB 24GB 32GB}"
 MEMORY_LIMITS="${MEMORY_LIMITS:-2GB}"
 LOG_DIR="${LOG_DIR:-./logs/postgres_memory_sweep_${SWEEP_TIMESTAMP}}"
+TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-7200}"  # 2 hour default timeout
+BENCHMARK_RUNS="${BENCHMARK_RUNS:-1}"  # Number of times to run each configuration
+CLEAR_CACHE_SCRIPT="/usr/local/sbin/clearcache3.sh"
 TEMP_TABLESPACE="${TEMP_TABLESPACE:-}"  # Optional temp tablespace for spilling
 OUTPUT="${OUTPUT:-}"  # Optional output path for binary mode
 
@@ -25,6 +29,8 @@ echo "Database: $DB_CONNECTION"
 echo "Table: $TABLE"
 echo "Parallel workers: $PARALLEL_WORKERS (Total processes: $((PARALLEL_WORKERS + 1)))"
 echo "Memory limits: $MEMORY_LIMITS"
+echo "Timeout: ${TIMEOUT_SECONDS}s"
+echo "Benchmark runs per config: $BENCHMARK_RUNS"
 echo "Log directory: $LOG_DIR"
 if [ -n "$TEMP_TABLESPACE" ]; then
     echo "Temp tablespace: $TEMP_TABLESPACE"
@@ -73,16 +79,21 @@ fi
 
 # Run sort for each memory limit
 for MEM in $MEMORY_LIMITS; do
+  for RUN in $(seq 1 $BENCHMARK_RUNS); do
     RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-    # Create individual log file for this configuration
-    LOG_FILE="${LOG_DIR}/${PARALLEL_WORKERS}workers_${MEM}_${RUN_TIMESTAMP}.log"
+    # Create individual log file for this configuration with run number suffix
+    LOG_FILE="${LOG_DIR}/${PARALLEL_WORKERS}workers_${MEM}_run${RUN}_${RUN_TIMESTAMP}.log"
+    TEMP_OUTPUT="/tmp/postgres_sweep_${MEM}_run${RUN}_${RUN_TIMESTAMP}.log"
 
     echo "========================================="
-    echo "Running with $MEM work_mem..."
+    echo "Running with $MEM work_mem... (Run $RUN of $BENCHMARK_RUNS)"
+    echo "Start time: $(date +"%Y-%m-%d %H:%M:%S")"
     echo "========================================="
     echo "Log file: $LOG_FILE"
+    echo "NOTE: Output will appear in real-time below..."
+    echo ""
 
-    # Run and capture output and exit code
+    # Run with timeout and show output in real-time using tee
     set +e
     if [ -n "$OUTPUT" ]; then
         # Binary output mode: truncate output file first in case it exists
@@ -93,42 +104,54 @@ for MEM in $MEMORY_LIMITS; do
         fi
 
         if [ -n "$TEMP_TABLESPACE" ]; then
-            COMMAND_OUTPUT=$(cargo run --release --bin sort-postgres --features db-postgres -- \
+            timeout $TIMEOUT_SECONDS cargo run --release --bin sort-postgres --features db-postgres -- \
                 --db "$DB_CONNECTION" \
                 --table "$TABLE" \
                 --total-memory "$MEM" \
                 --parallel-workers "$PARALLEL_WORKERS" \
                 --temp-tablespace "$TEMP_TABLESPACE" \
-                --output "$OUTPUT" 2>&1)
+                --output "$OUTPUT" 2>&1 | tee "$TEMP_OUTPUT"
         else
-            COMMAND_OUTPUT=$(cargo run --release --bin sort-postgres --features db-postgres -- \
+            timeout $TIMEOUT_SECONDS cargo run --release --bin sort-postgres --features db-postgres -- \
                 --db "$DB_CONNECTION" \
                 --table "$TABLE" \
                 --total-memory "$MEM" \
                 --parallel-workers "$PARALLEL_WORKERS" \
-                --output "$OUTPUT" 2>&1)
+                --output "$OUTPUT" 2>&1 | tee "$TEMP_OUTPUT"
         fi
     else
         # Count mode
         if [ -n "$TEMP_TABLESPACE" ]; then
-            COMMAND_OUTPUT=$(cargo run --release --bin sort-postgres --features db-postgres -- \
+            timeout $TIMEOUT_SECONDS cargo run --release --bin sort-postgres --features db-postgres -- \
                 --db "$DB_CONNECTION" \
                 --table "$TABLE" \
                 --total-memory "$MEM" \
                 --parallel-workers "$PARALLEL_WORKERS" \
-                --temp-tablespace "$TEMP_TABLESPACE" 2>&1)
+                --temp-tablespace "$TEMP_TABLESPACE" 2>&1 | tee "$TEMP_OUTPUT"
         else
-            COMMAND_OUTPUT=$(cargo run --release --bin sort-postgres --features db-postgres -- \
+            timeout $TIMEOUT_SECONDS cargo run --release --bin sort-postgres --features db-postgres -- \
                 --db "$DB_CONNECTION" \
                 --table "$TABLE" \
                 --total-memory "$MEM" \
-                --parallel-workers "$PARALLEL_WORKERS" 2>&1)
+                --parallel-workers "$PARALLEL_WORKERS" 2>&1 | tee "$TEMP_OUTPUT"
         fi
     fi
-    EXIT_CODE=$?
+
+    EXIT_CODE=${PIPESTATUS[0]}
     set -e
 
-    echo "$COMMAND_OUTPUT"
+    # Read captured output
+    COMMAND_OUTPUT=$(cat "$TEMP_OUTPUT")
+
+    # Check timeout - skip remaining runs for this configuration
+    if [ $EXIT_CODE -eq 124 ]; then
+        echo ""
+        echo "WARNING: Process timed out after ${TIMEOUT_SECONDS}s"
+        echo "Skipping remaining benchmark runs for $MEM work_mem..."
+        SKIP_REMAINING=true
+    else
+        SKIP_REMAINING=false
+    fi
 
     # Clear PostgreSQL's internal caches
     echo "Clearing PostgreSQL caches..."
@@ -142,15 +165,18 @@ for MEM in $MEMORY_LIMITS; do
         echo "========================================="
         echo "PostgreSQL Memory Sweep - Configuration Log"
         echo "========================================="
-        echo "Configuration: work_mem=$MEM, parallel_workers=$PARALLEL_WORKERS"
+        echo "Configuration: work_mem=$MEM, parallel_workers=$PARALLEL_WORKERS, run=$RUN/$BENCHMARK_RUNS"
         echo "Input: $INPUT_FILE"
         echo "Database: $DB_CONNECTION"
         echo "Table: $TABLE"
+        echo "Timeout: ${TIMEOUT_SECONDS}s"
         echo "Start time: $(date +"%Y-%m-%d %H:%M:%S")"
         echo ""
         echo "Exit code: $EXIT_CODE"
         if [ $EXIT_CODE -eq 0 ]; then
             echo "Status: SUCCESS"
+        elif [ $EXIT_CODE -eq 124 ]; then
+            echo "Status: TIMEOUT"
         else
             echo "Status: FAILED"
         fi
@@ -165,7 +191,7 @@ for MEM in $MEMORY_LIMITS; do
         echo "========================================="
         if [ -n "$DURATION" ]; then
             echo "Duration: ${DURATION}s"
-            echo "Result: $MEM,$PARALLEL_WORKERS,$DURATION"
+            echo "Result: $MEM,$PARALLEL_WORKERS,$RUN,$DURATION"
         else
             echo "WARNING: Could not extract timing information"
         fi
@@ -173,12 +199,19 @@ for MEM in $MEMORY_LIMITS; do
         echo "========================================="
     } > "$LOG_FILE"
 
+    # Clean up temp output file
+    rm -f "$TEMP_OUTPUT"
+
     # Report results
+    echo ""
+    echo "========================================="
     if [ -n "$DURATION" ]; then
-        echo "Result logged: work_mem=$MEM, parallel_workers=$PARALLEL_WORKERS, duration=${DURATION}s"
+        echo "✓ Result logged: work_mem=$MEM, parallel_workers=$PARALLEL_WORKERS, run=$RUN/$BENCHMARK_RUNS, duration=${DURATION}s"
     else
-        echo "Warning: Could not extract timing information"
+        echo "✗ Warning: Could not extract timing information"
     fi
+    echo "End time: $(date +"%Y-%m-%d %H:%M:%S")"
+    echo "========================================="
 
     # Clean up binary output file if it exists
     if [ -n "$OUTPUT" ] && [ -f "$OUTPUT" ]; then
@@ -192,12 +225,30 @@ for MEM in $MEMORY_LIMITS; do
         echo "Output file removed and synced."
     fi
 
+    # Clear system caches
+    if [ -x "$CLEAR_CACHE_SCRIPT" ]; then
+        echo "Clearing system caches..."
+        sudo "$CLEAR_CACHE_SCRIPT" || echo "Warning: Failed to clear caches"
+    else
+        echo "Warning: Cache clear script not found or not executable: $CLEAR_CACHE_SCRIPT"
+    fi
+
+    # Skip remaining benchmark runs for this configuration if timeout occurred
+    if [ "$SKIP_REMAINING" = true ]; then
+        echo "Moving to next configuration..."
+        break
+    fi
+
     echo ""
     echo "Waiting 30 seconds before next run..."
     sync
     sleep 30
     echo ""
+  done
 done
 
 echo "=== Sweep Complete ==="
 echo "Results saved to logs in: $LOG_DIR"
+echo ""
+echo "Summary of results:"
+grep "Result:" "$LOG_DIR"/*.log 2>/dev/null || echo "No successful results found"

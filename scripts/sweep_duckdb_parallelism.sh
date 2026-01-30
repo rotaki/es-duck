@@ -18,6 +18,8 @@ TEMP_DIR="${TEMP_DIR:-./duckdb_temp}"
 THREAD_COUNTS="${THREAD_COUNTS:-44 40 32 24 16 8 4}"
 LOG_DIR="${LOG_DIR:-./logs/duckdb_parallelism_sweep_${SWEEP_TIMESTAMP}}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-7200}"  # 2 hour default timeout
+BENCHMARK_RUNS="${BENCHMARK_RUNS:-1}"  # Number of times to run each configuration
+CLEAR_CACHE_SCRIPT="/usr/local/sbin/clearcache3.sh"
 OUTPUT="${OUTPUT:-}"  # Optional output path for parquet mode
 
 echo "=== DuckDB Parallelism Sweep ==="
@@ -28,6 +30,7 @@ echo "Table: $TABLE"
 echo "Memory limit: $MEMORY_LIMIT"
 echo "Thread counts: $THREAD_COUNTS"
 echo "Timeout: ${TIMEOUT_SECONDS}s"
+echo "Benchmark runs per config: $BENCHMARK_RUNS"
 echo "Log directory: $LOG_DIR"
 if [ -n "$OUTPUT" ]; then
     echo "Mode: Parquet output to $OUTPUT"
@@ -68,13 +71,14 @@ fi
 
 # Run sort for each thread count
 for T in $THREAD_COUNTS; do
+  for RUN in $(seq 1 $BENCHMARK_RUNS); do
     RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-    # Create individual log file for this configuration
-    LOG_FILE="${LOG_DIR}/${MEMORY_LIMIT}_${T}threads_${RUN_TIMESTAMP}.log"
-    TEMP_OUTPUT="/tmp/duckdb_sweep_${T}_${RUN_TIMESTAMP}.log"
+    # Create individual log file for this configuration with run number suffix
+    LOG_FILE="${LOG_DIR}/${MEMORY_LIMIT}_${T}threads_run${RUN}_${RUN_TIMESTAMP}.log"
+    TEMP_OUTPUT="/tmp/duckdb_sweep_${T}_run${RUN}_${RUN_TIMESTAMP}.log"
 
     echo "========================================="
-    echo "Running with $T threads..."
+    echo "Running with $T threads... (Run $RUN of $BENCHMARK_RUNS)"
     echo "Start time: $(date +"%Y-%m-%d %H:%M:%S")"
     echo "========================================="
     echo "Log file: $LOG_FILE"
@@ -114,10 +118,14 @@ for T in $THREAD_COUNTS; do
     # Read captured output
     COMMAND_OUTPUT=$(cat "$TEMP_OUTPUT")
 
-    # Check timeout
+    # Check timeout - skip remaining runs for this configuration
     if [ $EXIT_CODE -eq 124 ]; then
         echo ""
         echo "WARNING: Process timed out after ${TIMEOUT_SECONDS}s"
+        echo "Skipping remaining benchmark runs for $T threads..."
+        SKIP_REMAINING=true
+    else
+        SKIP_REMAINING=false
     fi
 
     # Extract timing from output
@@ -128,7 +136,7 @@ for T in $THREAD_COUNTS; do
         echo "========================================="
         echo "DuckDB Parallelism Sweep - Configuration Log"
         echo "========================================="
-        echo "Configuration: memory_limit=$MEMORY_LIMIT, threads=$T"
+        echo "Configuration: memory_limit=$MEMORY_LIMIT, threads=$T, run=$RUN/$BENCHMARK_RUNS"
         echo "Input: $INPUT_FILE"
         echo "Database: $DB_FILE"
         echo "Table: $TABLE"
@@ -155,7 +163,7 @@ for T in $THREAD_COUNTS; do
         echo "========================================="
         if [ -n "$DURATION" ]; then
             echo "Duration: ${DURATION}s"
-            echo "Result: $MEMORY_LIMIT,$T,$DURATION"
+            echo "Result: $MEMORY_LIMIT,$T,$RUN,$DURATION"
         else
             echo "WARNING: Could not extract timing information"
         fi
@@ -170,7 +178,7 @@ for T in $THREAD_COUNTS; do
     echo ""
     echo "========================================="
     if [ -n "$DURATION" ]; then
-        echo "✓ Result logged: memory_limit=$MEMORY_LIMIT, threads=$T, duration=${DURATION}s"
+        echo "✓ Result logged: memory_limit=$MEMORY_LIMIT, threads=$T, run=$RUN/$BENCHMARK_RUNS, duration=${DURATION}s"
     else
         echo "✗ Warning: Could not extract timing information"
     fi
@@ -199,10 +207,25 @@ for T in $THREAD_COUNTS; do
         echo "Temp directory cleaned."
     fi
 
+    # Clear system caches
+    if [ -x "$CLEAR_CACHE_SCRIPT" ]; then
+        echo "Clearing system caches..."
+        sudo "$CLEAR_CACHE_SCRIPT" || echo "Warning: Failed to clear caches"
+    else
+        echo "Warning: Cache clear script not found or not executable: $CLEAR_CACHE_SCRIPT"
+    fi
+
+    # Skip remaining benchmark runs for this configuration if timeout occurred
+    if [ "$SKIP_REMAINING" = true ]; then
+        echo "Moving to next configuration..."
+        break
+    fi
+
     echo ""
     echo "Waiting 30 seconds before next run..."
     sleep 30
     echo ""
+  done
 done
 
 echo "=== Sweep Complete ==="

@@ -2,7 +2,9 @@ use clap::Parser;
 use clickhouse::Client;
 use std::error::Error;
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::Instant;
+use uuid::Uuid;
 
 /// Parses strings like "1GB", "512MB" into a numeric byte value
 fn parse_memory_to_bytes(mem_str: &str) -> Result<u64, Box<dyn Error>> {
@@ -137,13 +139,52 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     println!("Running external sort ({})...", mode_description);
 
+    // Generate a unique query_id for tracking in system.query_log
+    let sort_query_id = Uuid::new_v4().to_string();
+    println!("Sort query_id: {}", sort_query_id);
+
     let start = Instant::now();
 
-    // Execute the query (both modes use execute() now)
-    client.query(&query).execute().await?;
+    // Execute the query with the query_id for tracking
+    let query_result = client
+        .query(&query)
+        .with_option("query_id", &sort_query_id)
+        .execute()
+        .await;
 
     let duration = start.elapsed();
     println!("\nTIMING: {:.2} seconds", duration.as_secs_f64());
+
+    // Print the UUID for reference
+    println!("QUERY_ID: {}", sort_query_id);
+
+    // Grep the log file for memory usage
+    let grep_output = Command::new("grep")
+        .args([&sort_query_id, "scripts/clickhouse.log"])
+        .output();
+
+    match grep_output {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            // Look for the MemoryTracker line
+            for line in stdout.lines() {
+                if line.contains("MemoryTracker") && line.contains("peak memory usage") {
+                    // Extract the memory part: "Query peak memory usage: 2.15 MiB."
+                    if let Some(mem_start) = line.find("peak memory usage:") {
+                        let mem_str = &line[mem_start..];
+                        println!("PEAK_MEMORY: {}", mem_str);
+                    }
+                    break;
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Warning: Could not grep log file: {}", e);
+        }
+    }
+
+    // Propagate the original query error if it failed
+    query_result?;
 
     Ok(())
 }

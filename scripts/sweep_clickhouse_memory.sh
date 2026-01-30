@@ -1,5 +1,5 @@
 #!/bin/bash
-# PostgreSQL parallelism sweep: vary parallel workers at fixed memory budget
+# ClickHouse memory sweep: vary memory limit at fixed thread count
 # FIXED VERSION: Shows real-time output and has timeout protection
 
 set -e
@@ -8,27 +8,28 @@ set -e
 SWEEP_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 # Configuration
-INPUT_FILE="${INPUT_FILE:-testdata/test_gensort.dat}"
+INPUT_FILE="${INPUT_FILE:-testdata/test_gensort_5gb.dat}"
 FORMAT="${FORMAT:-gensort}"
-DB_CONNECTION="${DB_CONNECTION:-postgres://postgres@localhost:5433/bench}"
+CLICKHOUSE_URL="${CLICKHOUSE_URL:-http://localhost:8123}"
+DATABASE="${DATABASE:-default}"
 TABLE="${TABLE:-bench_data}"
-# Support both TOTAL_MEMORY and WORK_MEM (backward compatibility)
-TOTAL_MEMORY="${TOTAL_MEMORY:-${WORK_MEM:-2GB}}"
-# WORKER_COUNTS="${WORKER_COUNTS:-4 8 16 24 32 40 44}"
-WORKER_COUNTS="${WORKER_COUNTS:-4}"
-LOG_DIR="${LOG_DIR:-./logs/postgres_parallelism_sweep_${SWEEP_TIMESTAMP}}"
-OUTPUT="${OUTPUT:-}"  # Optional output path for binary mode
+THREADS="${THREADS:-40}"
+# MEMORY_LIMITS="${MEMORY_LIMITS:-2GB 4GB 6GB 8GB 16GB 24GB 32GB}"
+MEMORY_LIMITS="${MEMORY_LIMITS:-100GB}"
+LOG_DIR="${LOG_DIR:-./logs/clickhouse_memory_sweep_${SWEEP_TIMESTAMP}}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-7200}"  # 2 hour default timeout
 BENCHMARK_RUNS="${BENCHMARK_RUNS:-1}"  # Number of times to run each configuration
 CLEAR_CACHE_SCRIPT="/usr/local/sbin/clearcache3.sh"
+OUTPUT="${OUTPUT:-}"  # Optional output path for binary mode
 
-echo "=== PostgreSQL Parallelism Sweep ==="
+echo "=== ClickHouse Memory Sweep ==="
 echo "Input: $INPUT_FILE"
 echo "Format: $FORMAT"
-echo "Database: $DB_CONNECTION"
+echo "ClickHouse URL: $CLICKHOUSE_URL"
+echo "Database: $DATABASE"
 echo "Table: $TABLE"
-echo "Total memory budget: $TOTAL_MEMORY"
-echo "Worker counts: $WORKER_COUNTS"
+echo "Threads: $THREADS"
+echo "Memory limits: $MEMORY_LIMITS"
 echo "Timeout: ${TIMEOUT_SECONDS}s"
 echo "Benchmark runs per config: $BENCHMARK_RUNS"
 echo "Log directory: $LOG_DIR"
@@ -42,48 +43,40 @@ echo ""
 # Create log directory
 mkdir -p "$LOG_DIR"
 
-# Extract database name from connection string
-DB_NAME=$(echo "$DB_CONNECTION" | sed -n 's|.*://.*@.*/\([^?]*\).*|\1|p' || echo "$DB_CONNECTION" | sed -n 's|.*://[^/]*/\([^?]*\).*|\1|p')
-# Extract connection string without database name for creating database
-DB_CONN_BASE=$(echo "$DB_CONNECTION" | sed 's|/[^/]*$|/postgres|')
-
-# Check if database exists, create if needed
-DB_EXISTS=$(psql "$DB_CONN_BASE" -tAc "SELECT EXISTS (SELECT FROM pg_database WHERE datname = '$DB_NAME')" 2>/dev/null || echo "f")
-if [ "$DB_EXISTS" = "f" ]; then
-    echo "Creating database '$DB_NAME'..."
-    psql "$DB_CONN_BASE" -c "CREATE DATABASE $DB_NAME" >/dev/null
-    echo "Database created."
-fi
-
-# Check if table exists
-TABLE_EXISTS=$(psql "$DB_CONNECTION" -tAc "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = '$TABLE')" 2>/dev/null || echo "f")
+# Check if table exists by querying system.tables
+TABLE_EXISTS=$(curl -sS "${CLICKHOUSE_URL}/?query=SELECT%20count(*)%20FROM%20system.tables%20WHERE%20database%20=%20'${DATABASE}'%20AND%20name%20=%20'${TABLE}'" 2>/dev/null || echo "0")
 
 # Load database if table doesn't exist
-if [ "$TABLE_EXISTS" = "f" ]; then
-    echo "Loading data into PostgreSQL..."
-    cargo run --release --bin load-postgres --features db-postgres -- \
+if [ "$TABLE_EXISTS" = "0" ]; then
+    echo "Loading data into ClickHouse..."
+    echo "NOTE: This will show output in real-time..."
+
+    timeout $TIMEOUT_SECONDS cargo run --release --bin load-clickhouse --features db-clickhouse -- \
         --format "$FORMAT" \
         --input "$INPUT_FILE" \
-        --db "$DB_CONNECTION" \
+        --url "$CLICKHOUSE_URL" \
+        --database "$DATABASE" \
         --table "$TABLE" \
-        --threads 14
+        --threads "$THREADS" || {
+        echo "ERROR: Database loading failed or timed out"
+        exit 1
+    }
 
-    echo "Running CHECKPOINT..."
-    psql "$DB_CONNECTION" -c "CHECKPOINT" >/dev/null
+    echo "Syncing..."
     sync
     echo ""
 fi
 
-# Run sort for each worker count
-for W in $WORKER_COUNTS; do
+# Run sort for each memory limit
+for MEM in $MEMORY_LIMITS; do
   for RUN in $(seq 1 $BENCHMARK_RUNS); do
     RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
     # Create individual log file for this configuration with run number suffix
-    LOG_FILE="${LOG_DIR}/${TOTAL_MEMORY}_${W}workers_run${RUN}_${RUN_TIMESTAMP}.log"
-    TEMP_OUTPUT="/tmp/postgres_sweep_${W}_run${RUN}_${RUN_TIMESTAMP}.log"
+    LOG_FILE="${LOG_DIR}/${THREADS}threads_${MEM}_run${RUN}_${RUN_TIMESTAMP}.log"
+    TEMP_OUTPUT="/tmp/clickhouse_sweep_${MEM}_run${RUN}_${RUN_TIMESTAMP}.log"
 
     echo "========================================="
-    echo "Running with $W parallel workers... (Run $RUN of $BENCHMARK_RUNS)"
+    echo "Running with $MEM memory limit... (Run $RUN of $BENCHMARK_RUNS)"
     echo "Start time: $(date +"%Y-%m-%d %H:%M:%S")"
     echo "========================================="
     echo "Log file: $LOG_FILE"
@@ -100,19 +93,21 @@ for W in $WORKER_COUNTS; do
             sync
         fi
 
-        timeout $TIMEOUT_SECONDS cargo run --release --bin sort-postgres --features db-postgres -- \
-            --db "$DB_CONNECTION" \
+        timeout $TIMEOUT_SECONDS cargo run --release --bin sort-clickhouse --features db-clickhouse -- \
+            --url "$CLICKHOUSE_URL" \
+            --database "$DATABASE" \
             --table "$TABLE" \
-            --total-memory "$TOTAL_MEMORY" \
-            --parallel-workers "$W" \
+            --memory-limit "$MEM" \
+            --threads "$THREADS" \
             --output "$OUTPUT" 2>&1 | tee "$TEMP_OUTPUT"
     else
         # Count mode
-        timeout $TIMEOUT_SECONDS cargo run --release --bin sort-postgres --features db-postgres -- \
-            --db "$DB_CONNECTION" \
+        timeout $TIMEOUT_SECONDS cargo run --release --bin sort-clickhouse --features db-clickhouse -- \
+            --url "$CLICKHOUSE_URL" \
+            --database "$DATABASE" \
             --table "$TABLE" \
-            --total-memory "$TOTAL_MEMORY" \
-            --parallel-workers "$W" 2>&1 | tee "$TEMP_OUTPUT"
+            --memory-limit "$MEM" \
+            --threads "$THREADS" 2>&1 | tee "$TEMP_OUTPUT"
     fi
 
     EXIT_CODE=${PIPESTATUS[0]}
@@ -125,15 +120,17 @@ for W in $WORKER_COUNTS; do
     if [ $EXIT_CODE -eq 124 ]; then
         echo ""
         echo "WARNING: Process timed out after ${TIMEOUT_SECONDS}s"
-        echo "Skipping remaining benchmark runs for $W workers..."
+        echo "Skipping remaining benchmark runs for $MEM memory limit..."
         SKIP_REMAINING=true
     else
         SKIP_REMAINING=false
     fi
 
-    # Clear PostgreSQL's internal caches
-    echo "Clearing PostgreSQL caches..."
-    psql "$DB_CONNECTION" -c "DISCARD ALL" >/dev/null 2>&1 || true
+    # Clear ClickHouse's internal caches using SYSTEM DROP commands
+    echo "Clearing ClickHouse caches..."
+    curl -sS "${CLICKHOUSE_URL}/?query=SYSTEM%20DROP%20MARK%20CACHE" >/dev/null 2>&1 || true
+    curl -sS "${CLICKHOUSE_URL}/?query=SYSTEM%20DROP%20UNCOMPRESSED%20CACHE" >/dev/null 2>&1 || true
+    curl -sS "${CLICKHOUSE_URL}/?query=SYSTEM%20DROP%20COMPILED%20EXPRESSION%20CACHE" >/dev/null 2>&1 || true
 
     # Extract timing from output
     DURATION=$(echo "$COMMAND_OUTPUT" | grep "TIMING:" | awk '{print $2}')
@@ -141,11 +138,12 @@ for W in $WORKER_COUNTS; do
     # Write detailed log to individual file
     {
         echo "========================================="
-        echo "PostgreSQL Parallelism Sweep - Configuration Log"
+        echo "ClickHouse Memory Sweep - Configuration Log"
         echo "========================================="
-        echo "Configuration: total_memory=$TOTAL_MEMORY, parallel_workers=$W, run=$RUN/$BENCHMARK_RUNS"
+        echo "Configuration: memory_limit=$MEM, threads=$THREADS, run=$RUN/$BENCHMARK_RUNS"
         echo "Input: $INPUT_FILE"
-        echo "Database: $DB_CONNECTION"
+        echo "ClickHouse URL: $CLICKHOUSE_URL"
+        echo "Database: $DATABASE"
         echo "Table: $TABLE"
         echo "Timeout: ${TIMEOUT_SECONDS}s"
         echo "Start time: $(date +"%Y-%m-%d %H:%M:%S")"
@@ -169,7 +167,7 @@ for W in $WORKER_COUNTS; do
         echo "========================================="
         if [ -n "$DURATION" ]; then
             echo "Duration: ${DURATION}s"
-            echo "Result: $TOTAL_MEMORY,$W,$RUN,$DURATION"
+            echo "Result: $MEM,$THREADS,$RUN,$DURATION"
         else
             echo "WARNING: Could not extract timing information"
         fi
@@ -184,7 +182,7 @@ for W in $WORKER_COUNTS; do
     echo ""
     echo "========================================="
     if [ -n "$DURATION" ]; then
-        echo "✓ Result logged: total_memory=$TOTAL_MEMORY, parallel_workers=$W, run=$RUN/$BENCHMARK_RUNS, duration=${DURATION}s"
+        echo "✓ Result logged: memory_limit=$MEM, threads=$THREADS, run=$RUN/$BENCHMARK_RUNS, duration=${DURATION}s"
     else
         echo "✗ Warning: Could not extract timing information"
     fi
