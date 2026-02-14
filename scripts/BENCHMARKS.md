@@ -111,6 +111,18 @@ For each database (in order: duckdb, postgres, clickhouse):
 - **Sort binary**: `sort-clickhouse --memory-limit 10GB --threads N`
 - **Delegation**: Calls `sweep_clickhouse_parallelism.sh` directly
 
+### Memory Enforcement
+
+The `MEMORY_LIMIT` parameter is interpreted differently by each database:
+
+| Database | Setting | Enforcement |
+|----------|---------|-------------|
+| DuckDB | `SET memory_limit` | Hard cap on total query memory. DuckDB spills to disk or errors when exceeded. |
+| PostgreSQL | `SET work_mem = total_memory / workers` | Per-operator limit. Controls when each sort/hash spills to disk, but does not cap total query memory. |
+| ClickHouse | `max_bytes_before_external_sort` | Controls when sorting spills to disk, but `max_memory_usage` is **not** set, so total query memory is unbounded. |
+
+As a result, ClickHouse may use significantly more memory than the configured `MEMORY_LIMIT` for non-sort operations (e.g., reading, decompression, buffering), while DuckDB is the most strictly bounded.
+
 ## PostgreSQL Plan Skipping
 
 ### The Problem
