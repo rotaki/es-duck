@@ -66,6 +66,178 @@ echo "Timestamp:      $SWEEP_TIMESTAMP"
 echo "========================================================"
 echo ""
 
+# ── Installation Functions ────────────────────────────────────────────────────
+
+POSTGRES_VERSION="18.1"
+
+install_postgres() {
+    if [[ -x "${POSTGRES_DIR}/bin/postgres" ]]; then
+        echo "[install] PostgreSQL already installed at ${POSTGRES_DIR}/bin/postgres"
+        return 0
+    fi
+
+    echo "[install] PostgreSQL not found locally. Downloading PostgreSQL ${POSTGRES_VERSION}..."
+
+    # Detect OS and architecture
+    local OS ARCH
+    case "$(uname -s)" in
+        Darwin*) OS="macos" ;;
+        Linux*)  OS="linux" ;;
+        *)
+            echo "Error: Unsupported OS: $(uname -s)" >&2
+            return 1
+            ;;
+    esac
+
+    case "$(uname -m)" in
+        x86_64|amd64)    ARCH="x86_64" ;;
+        arm64|aarch64)   ARCH="arm64" ;;
+        *)
+            echo "Error: Unsupported architecture: $(uname -m)" >&2
+            return 1
+            ;;
+    esac
+
+    mkdir -p "${POSTGRES_DIR}"
+
+    if [[ "$OS" == "macos" ]]; then
+        local POSTGRES_APP_VERSION="2.8.1"
+        local BINARY_URL BINARY_FILE BINARY_FAILED=""
+
+        if [[ "$ARCH" == "arm64" ]]; then
+            BINARY_URL="https://github.com/PostgresApp/PostgresApp/releases/download/v${POSTGRES_APP_VERSION}/Postgres-${POSTGRES_APP_VERSION}-18-arm64.zip"
+        else
+            BINARY_URL="https://github.com/PostgresApp/PostgresApp/releases/download/v${POSTGRES_APP_VERSION}/Postgres-${POSTGRES_APP_VERSION}-18.zip"
+        fi
+
+        BINARY_FILE="/tmp/postgres-${ARCH}.zip"
+
+        echo "[install] Downloading from ${BINARY_URL}..."
+        if curl -f -L -o "${BINARY_FILE}" "${BINARY_URL}"; then
+            echo "[install] Extracting binaries..."
+            cd /tmp
+            unzip -q "${BINARY_FILE}"
+
+            if [[ -d "Postgres.app" ]]; then
+                cp -R "Postgres.app/Contents/Versions/18/"* "${POSTGRES_DIR}/"
+                rm -rf "Postgres.app"
+            fi
+
+            rm "${BINARY_FILE}"
+            cd "${SCRIPT_DIR}"
+
+            if [[ -x "${POSTGRES_DIR}/bin/postgres" ]]; then
+                echo "[install] Successfully installed PostgreSQL binaries!"
+            else
+                echo "[install] Binary extraction failed, falling back to source compilation..."
+                BINARY_FAILED=1
+            fi
+        else
+            echo "[install] Binary download failed, falling back to source compilation..."
+            BINARY_FAILED=1
+        fi
+
+        if [[ -n "${BINARY_FAILED}" ]]; then
+            local SOURCE_URL="https://ftp.postgresql.org/pub/source/v${POSTGRES_VERSION}/postgresql-${POSTGRES_VERSION}.tar.gz"
+            local SOURCE_FILE="/tmp/postgresql-${POSTGRES_VERSION}.tar.gz"
+
+            echo "[install] Downloading and compiling from source..."
+            curl -L -o "${SOURCE_FILE}" "${SOURCE_URL}"
+            tar -xzf "${SOURCE_FILE}" -C /tmp
+            cd "/tmp/postgresql-${POSTGRES_VERSION}"
+            ./configure --prefix="${POSTGRES_DIR}" --without-readline --without-zlib --without-icu
+            make -j$(sysctl -n hw.ncpu)
+            make install
+            rm -rf "/tmp/postgresql-${POSTGRES_VERSION}" "${SOURCE_FILE}"
+            cd "${SCRIPT_DIR}"
+        fi
+    else
+        # Linux: compile from source
+        local SOURCE_URL="https://ftp.postgresql.org/pub/source/v${POSTGRES_VERSION}/postgresql-${POSTGRES_VERSION}.tar.gz"
+        local SOURCE_FILE="/tmp/postgresql-${POSTGRES_VERSION}.tar.gz"
+
+        echo "[install] Compiling PostgreSQL from source for Linux..."
+        curl -L -o "${SOURCE_FILE}" "${SOURCE_URL}"
+        tar -xzf "${SOURCE_FILE}" -C /tmp
+        cd "/tmp/postgresql-${POSTGRES_VERSION}"
+        ./configure --prefix="${POSTGRES_DIR}" --without-readline --without-zlib --without-icu
+        make -j$(nproc)
+        make install
+        rm -rf "/tmp/postgresql-${POSTGRES_VERSION}" "${SOURCE_FILE}"
+        cd "${SCRIPT_DIR}"
+    fi
+
+    echo "[install] PostgreSQL ${POSTGRES_VERSION} installed successfully!"
+}
+
+install_clickhouse() {
+    if [[ -x "${CLICKHOUSE_BIN_DIR}/clickhouse" ]]; then
+        echo "[install] ClickHouse already installed at ${CLICKHOUSE_BIN_DIR}/clickhouse"
+        return 0
+    fi
+
+    echo "[install] ClickHouse binary not found locally. Fetching latest version..."
+
+    local TAG_NAME
+    TAG_NAME=$(curl -s "https://api.github.com/repos/ClickHouse/ClickHouse/releases/latest" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+
+    if [[ -z "$TAG_NAME" ]]; then
+        echo "Error: Could not fetch latest ClickHouse version" >&2
+        return 1
+    fi
+
+    local VERSION="${TAG_NAME#v}"
+    VERSION="${VERSION%-stable}"
+
+    echo "[install] Downloading ${TAG_NAME} (version ${VERSION})..."
+    mkdir -p "${CLICKHOUSE_BIN_DIR}"
+
+    local OS ARCH ASSET_NAME IS_TARBALL URL
+    OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+    ARCH="$(uname -m)"
+
+    if [[ "$OS" == "darwin" ]]; then
+        IS_TARBALL=false
+        if [[ "$ARCH" == "arm64" || "$ARCH" == "aarch64" ]]; then
+            ASSET_NAME="clickhouse-macos-aarch64"
+        elif [[ "$ARCH" == "x86_64" ]]; then
+            ASSET_NAME="clickhouse-macos"
+        else
+            echo "Unsupported macOS architecture: $ARCH" >&2
+            return 1
+        fi
+    elif [[ "$OS" == "linux" ]]; then
+        IS_TARBALL=true
+        if [[ "$ARCH" == "x86_64" ]]; then
+            ASSET_NAME="clickhouse-common-static-${VERSION}-amd64.tgz"
+        elif [[ "$ARCH" == "arm64" || "$ARCH" == "aarch64" ]]; then
+            ASSET_NAME="clickhouse-common-static-${VERSION}-arm64.tgz"
+        else
+            echo "Unsupported Linux architecture: $ARCH" >&2
+            return 1
+        fi
+    else
+        echo "Unsupported operating system: $OS" >&2
+        return 1
+    fi
+
+    URL="https://github.com/ClickHouse/ClickHouse/releases/download/${TAG_NAME}/${ASSET_NAME}"
+
+    echo "[install] Downloading from ${URL}..."
+
+    if [[ "$IS_TARBALL" == true ]]; then
+        curl -f -L -o "${CLICKHOUSE_BIN_DIR}/${ASSET_NAME}" "${URL}"
+        echo "[install] Extracting ClickHouse binary..."
+        tar -xzf "${CLICKHOUSE_BIN_DIR}/${ASSET_NAME}" -C "${CLICKHOUSE_BIN_DIR}" --strip-components=3 --wildcards "*/usr/bin/clickhouse"
+        rm "${CLICKHOUSE_BIN_DIR}/${ASSET_NAME}"
+    else
+        curl -f -L -o "${CLICKHOUSE_BIN_DIR}/clickhouse" "${URL}"
+    fi
+
+    chmod +x "${CLICKHOUSE_BIN_DIR}/clickhouse"
+    echo "[install] ClickHouse installed successfully!"
+}
+
 # ── Helper Functions ──────────────────────────────────────────────────────────
 
 stop_postgres() {
@@ -432,6 +604,7 @@ run_postgres_benchmark() {
     echo "  PostgreSQL Parallelism Sweep (with plan deduplication)"
     echo "========================================================"
 
+    install_postgres
     stop_other_dbs "postgres"
     check_ssd_space
     prepare_data_on_ssd "postgres"
@@ -627,6 +800,7 @@ run_clickhouse_benchmark() {
     echo "  ClickHouse Parallelism Sweep"
     echo "========================================================"
 
+    install_clickhouse
     stop_other_dbs "clickhouse"
     check_ssd_space
     prepare_data_on_ssd "clickhouse"
