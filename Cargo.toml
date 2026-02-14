@@ -10,7 +10,7 @@ serde = { version = "1", features = ["derive"] }
 
 # Database-specific dependencies (optional)
 clickhouse = { version = "0.14", optional = true }
-duckdb = { version = "1.4.3", features = ["bundled"], optional = true }
+duckdb = { version = "1.4.4", features = ["bundled"], optional = true }
 postgres = { version = "0.19", optional = true }
 
 # Utility dependencies (optional)
