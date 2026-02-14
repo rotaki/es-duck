@@ -604,7 +604,6 @@ run_postgres_benchmark() {
     echo "  PostgreSQL Parallelism Sweep (with plan deduplication)"
     echo "========================================================"
 
-    install_postgres
     stop_other_dbs "postgres"
     check_ssd_space
     prepare_data_on_ssd "postgres"
@@ -800,7 +799,6 @@ run_clickhouse_benchmark() {
     echo "  ClickHouse Parallelism Sweep"
     echo "========================================================"
 
-    install_clickhouse
     stop_other_dbs "clickhouse"
     check_ssd_space
     prepare_data_on_ssd "clickhouse"
@@ -834,6 +832,14 @@ run_clickhouse_benchmark() {
 }
 
 # ── Main ──────────────────────────────────────────────────────────────────────
+
+# Install database binaries upfront (no-op if already present)
+for DB in $DATABASES; do
+    case "$DB" in
+        postgres)   install_postgres ;;
+        clickhouse) install_clickhouse ;;
+    esac
+done
 
 for DB in $DATABASES; do
     case "$DB" in
