@@ -13,8 +13,8 @@ struct Args {
     #[arg(long, default_value = "bench_data")]
     table: String,
 
-    /// TOTAL memory budget for the entire sort (e.g., "2GB", "4GB")
-    #[arg(long, default_value = "2GB")]
+    /// TOTAL memory budget for the entire sort (e.g., "2GiB", "4GiB")
+    #[arg(long, default_value = "2GiB")]
     total_memory: String,
 
     /// Number of parallel workers (Total processes = workers + 1)
@@ -26,17 +26,17 @@ struct Args {
     output: Option<String>,
 }
 
-/// Parses strings like "2GB", "512MB" into a numeric byte value
+/// Parses strings like "2GiB", "512MiB" into a numeric KiB value
 fn parse_memory_to_kb(mem_str: &str) -> Result<i64, Box<dyn Error>> {
     let s = mem_str.to_uppercase();
-    if s.ends_with("GB") || s.ends_with("G") {
-        let val: f64 = s.trim_end_matches('G').trim_end_matches("GB").parse()?;
+    if s.ends_with("GIB") {
+        let val: f64 = s.trim_end_matches("GIB").parse()?;
         Ok((val * 1024.0 * 1024.0) as i64)
-    } else if s.ends_with("MB") || s.ends_with("M") {
-        let val: f64 = s.trim_end_matches('M').trim_end_matches("MB").parse()?;
+    } else if s.ends_with("MIB") {
+        let val: f64 = s.trim_end_matches("MIB").parse()?;
         Ok((val * 1024.0) as i64)
     } else {
-        Err("Unsupported memory format. Use GB or MB (e.g., '2GB')".into())
+        Err("Unsupported memory format. Use GiB or MiB (e.g., '2GiB')".into())
     }
 }
 
@@ -91,11 +91,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         )?
         .get(0);
 
-    let size_gb = table_size as f64 / (1024.0 * 1024.0 * 1024.0);
+    let size_gib = table_size as f64 / (1024.0 * 1024.0 * 1024.0);
 
     println!("Table: {}", args.table);
     println!("Row count: {}", row_count);
-    println!("Size: {:.2} GB", size_gb);
+    println!("Size: {:.2} GiB", size_gib);
     println!();
 
     // Build the actual query based on mode

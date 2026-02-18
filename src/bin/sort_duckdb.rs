@@ -20,8 +20,8 @@ struct Args {
     #[arg(long)]
     temp_dir: Option<PathBuf>,
 
-    /// Memory limit for DuckDB (e.g., "1GB", "512MB")
-    #[arg(long, default_value = "1GB")]
+    /// Memory limit for DuckDB (e.g., "1GiB", "512MiB")
+    #[arg(long, default_value = "1GiB")]
     memory_limit: String,
 
     /// Number of threads for DuckDB to use
@@ -64,6 +64,24 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("Setting memory_limit to {}", args.memory_limit);
     conn.execute(&format!("SET memory_limit = '{}';", args.memory_limit), [])?;
 
+    // Print active settings to confirm configuration is applied correctly
+    {
+        let mut stmt = conn.prepare(
+            "SELECT name, value \
+             FROM duckdb_settings() \
+             WHERE name IN ('memory_limit', 'threads', 'temp_directory', 'worker_threads', 'max_memory') \
+             ORDER BY name",
+        )?;
+        let mut rows = stmt.query([])?;
+        println!("\n===== DUCKDB ACTIVE SETTINGS =====");
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(0)?;
+            let value: String = row.get(1)?;
+            println!("  {}: {}", name, value);
+        }
+        println!("===================================\n");
+    }
+
     // Get table statistics
     println!("Gathering table statistics...");
     let row_count: i64 =
@@ -78,7 +96,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("Table: {}", args.table);
     println!("Row count: {}", row_count);
     println!(
-        "Database size: {} bytes ({:.2} GB)",
+        "Database size: {} bytes ({:.2} GiB)",
         table_size_bytes,
         table_size_bytes as f64 / 1_073_741_824.0
     );
@@ -98,7 +116,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             format!("writing to '{}'", output_path.display()),
         )
     } else {
-        let analyze_query = format!("EXPLAIN ANALYZE {}", select_query);
+        let analyze_query = format!(
+            "EXPLAIN ANALYZE\nSELECT any_value(COLUMNS(*))\nFROM (\n  {}\n)",
+            select_query
+        );
         (analyze_query, format!("analyze mode on '{}'", args.table))
     };
 

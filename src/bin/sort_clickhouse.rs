@@ -6,17 +6,17 @@ use std::process::Command;
 use std::time::Instant;
 use uuid::Uuid;
 
-/// Parses strings like "1GB", "512MB" into a numeric byte value
+/// Parses strings like "1GiB", "512MiB" into a numeric byte value
 fn parse_memory_to_bytes(mem_str: &str) -> Result<u64, Box<dyn Error>> {
     let s = mem_str.to_uppercase();
-    if s.ends_with("GB") || s.ends_with("G") {
-        let val: f64 = s.trim_end_matches('G').trim_end_matches("GB").parse()?;
+    if s.ends_with("GIB") {
+        let val: f64 = s.trim_end_matches("GIB").parse()?;
         Ok((val * 1024.0 * 1024.0 * 1024.0) as u64)
-    } else if s.ends_with("MB") || s.ends_with("M") {
-        let val: f64 = s.trim_end_matches('M').trim_end_matches("MB").parse()?;
+    } else if s.ends_with("MIB") {
+        let val: f64 = s.trim_end_matches("MIB").parse()?;
         Ok((val * 1024.0 * 1024.0) as u64)
     } else {
-        Err("Unsupported memory format. Use GB or MB (e.g., '1GB', '512MB')".into())
+        Err("Unsupported memory format. Use GiB or MiB (e.g., '1GiB', '512MiB')".into())
     }
 }
 
@@ -36,8 +36,8 @@ struct Args {
     #[arg(long, default_value = "bench_data")]
     table: String,
 
-    /// Memory limit for external sorting (e.g., "1GB", "512MB")
-    #[arg(long, default_value = "1GB")]
+    /// Memory limit for external sorting (e.g., "1GiB", "512MiB")
+    #[arg(long, default_value = "1GiB")]
     memory_limit: String,
 
     #[arg(long)]
@@ -77,7 +77,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("Table: {}", args.table);
     println!("Row count: {}", row_count);
     println!(
-        "Table size: {} bytes ({:.2} GB)",
+        "Table size: {} bytes ({:.2} GiB)",
         table_size_bytes,
         table_size_bytes as f64 / 1_073_741_824.0
     );
