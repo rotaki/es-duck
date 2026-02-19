@@ -9,7 +9,7 @@
 #   INPUT_FILE - path to input data file
 #
 # Optional overrides:
-#   MEMORY_LIMIT    - memory budget (default: 10GB)
+#   MEMORY_LIMIT    - memory budget (default: 10GiB)
 #   THREAD_COUNTS   - space-separated thread counts (default: "4 8 16 24 32 40 44")
 #   BENCHMARK_RUNS  - runs per configuration (default: 3)
 #   SSD_BASE        - SSD data directory (default: /mnt/nvme1/rotaki/es/datasets)
@@ -30,7 +30,7 @@ PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # ── Configuration ─────────────────────────────────────────────────────────────
 INPUT_FILE="${INPUT_FILE:?INPUT_FILE must be set}"
 FORMAT="${FORMAT:-gensort}"
-MEMORY_LIMIT="${MEMORY_LIMIT:-10GB}"
+MEMORY_LIMIT="${MEMORY_LIMIT:-10GiB}"
 THREAD_COUNTS="${THREAD_COUNTS:-4 8 16 24 32 40 44}"
 BENCHMARK_RUNS="${BENCHMARK_RUNS:-3}"
 TABLE="${TABLE:-bench_data}"
@@ -423,14 +423,14 @@ parse_memory_to_bytes() {
     local mem="${raw^^}"
     local value
 
-    # Prefer GB/MB labels in scripts, but keep legacy binary-unit suffixes for compatibility.
-    if [[ "$mem" =~ ^([0-9]+([.][0-9]+)?)(GB|GIB|G)$ ]]; then
+    # Accepts GiB/MiB/KiB (binary units), or shorthand G/M/K.
+    if [[ "$mem" =~ ^([0-9]+([.][0-9]+)?)(GIB|G)$ ]]; then
         value="${BASH_REMATCH[1]}"
         awk -v v="$value" 'BEGIN { printf "%.0f\n", v * 1024 * 1024 * 1024 }'
-    elif [[ "$mem" =~ ^([0-9]+([.][0-9]+)?)(MB|MIB|M)$ ]]; then
+    elif [[ "$mem" =~ ^([0-9]+([.][0-9]+)?)(MIB|M)$ ]]; then
         value="${BASH_REMATCH[1]}"
         awk -v v="$value" 'BEGIN { printf "%.0f\n", v * 1024 * 1024 }'
-    elif [[ "$mem" =~ ^([0-9]+([.][0-9]+)?)(KB|KIB|K)$ ]]; then
+    elif [[ "$mem" =~ ^([0-9]+([.][0-9]+)?)(KIB|K)$ ]]; then
         value="${BASH_REMATCH[1]}"
         awk -v v="$value" 'BEGIN { printf "%.0f\n", v * 1024 }'
     elif [[ "$mem" =~ ^([0-9]+([.][0-9]+)?)B?$ ]]; then
@@ -603,9 +603,9 @@ check_ssd_space() {
     local avail_kb
     avail_kb=$(df --output=avail "$SSD_BASE" 2>/dev/null | tail -1 | tr -d ' ')
     local avail_gib=$((avail_kb / 1024 / 1024))
-    echo "[helper] SSD available: ${avail_gib}GB"
+    echo "[helper] SSD available: ${avail_gib}GiB"
     if [[ $avail_gib -lt 50 ]]; then
-        echo "WARNING: Less than 50GB available on SSD ($SSD_BASE). Proceeding anyway..."
+        echo "WARNING: Less than 50GiB available on SSD ($SSD_BASE). Proceeding anyway..."
     fi
 }
 
@@ -810,9 +810,9 @@ get_postgres_plan() {
     local total_bytes total_kb
 
     # Parse memory to KiB (matching sort_postgres.rs logic).
-    # Accepts GB/MB units (plus legacy suffixes and shorthand G/M).
+    # Accepts GiB/MiB units (plus legacy suffixes and shorthand G/M).
     if ! total_bytes=$(parse_memory_to_bytes "$MEMORY_LIMIT"); then
-        echo "ERROR: Cannot parse MEMORY_LIMIT=$MEMORY_LIMIT (expected GB or MB, e.g. '10GB')" >&2
+        echo "ERROR: Cannot parse MEMORY_LIMIT=$MEMORY_LIMIT (expected GiB or MiB, e.g. '10GiB')" >&2
         return 1
     fi
     total_kb=$((total_bytes / 1024))
