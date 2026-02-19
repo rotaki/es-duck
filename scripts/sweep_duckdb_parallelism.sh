@@ -21,6 +21,29 @@ TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-7200}"  # 2 hour default timeout
 BENCHMARK_RUNS="${BENCHMARK_RUNS:-1}"  # Number of times to run each configuration
 CLEAR_CACHE_SCRIPT="/usr/local/sbin/clearcache3.sh"
 OUTPUT="${OUTPUT:-}"  # Optional output path for parquet mode
+RCLONE_REMOTE="${RCLONE_REMOTE:-}"
+
+upload_log_file() {
+    local log_file="$1"
+
+    if [ -z "$RCLONE_REMOTE" ]; then
+        return 0
+    fi
+    if ! command -v rclone >/dev/null 2>&1; then
+        echo "[upload] rclone not found, skipping per-run upload."
+        return 0
+    fi
+
+    local remote_dir="${RCLONE_REMOTE}/$(basename "$LOG_DIR")"
+    local remote_file="${remote_dir}/$(basename "$log_file")"
+
+    echo "[upload] Uploading log file $log_file -> $remote_file ..."
+    if rclone copyto "$log_file" "$remote_file" --progress; then
+        echo "[upload] Upload complete: $remote_file"
+    else
+        echo "[upload] Warning: per-run upload failed (exit $?)" >&2
+    fi
+}
 
 echo "=== DuckDB Parallelism Sweep ==="
 echo "Input: $INPUT_FILE"
@@ -129,7 +152,7 @@ for T in $THREAD_COUNTS; do
     fi
 
     # Extract timing from output
-    DURATION=$(echo "$COMMAND_OUTPUT" | grep "TIMING:" | awk '{print $2}')
+    DURATION=$(echo "$COMMAND_OUTPUT" | grep "TIMING:" | awk '{print $2}' || true)
 
     # Write detailed log to individual file
     {
@@ -170,6 +193,8 @@ for T in $THREAD_COUNTS; do
         echo "End time: $(date +"%Y-%m-%d %H:%M:%S")"
         echo "========================================="
     } > "$LOG_FILE"
+
+    upload_log_file "$LOG_FILE"
 
     # Clean up temp output file
     rm -f "$TEMP_OUTPUT"

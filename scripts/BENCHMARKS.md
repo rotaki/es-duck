@@ -44,8 +44,8 @@ All settings are controlled via environment variables:
 |----------|---------|-------------|
 | `INPUT_FILE` | **(required)** | Path to the input data file |
 | `FORMAT` | `gensort` | Input format (`gensort` or `kvbin`) |
-| `MEMORY_LIMIT` | `10GB` | Memory budget for sorting |
-| `THREAD_COUNTS` | `4 8 16 24 32 40 44` | Space-separated thread/worker counts to sweep |
+| `MEMORY_LIMIT` | `10GiB` | Memory budget for sorting |
+| `THREAD_COUNTS` | `4 8 16 24 32 40 44` | Space-separated thread counts to sweep (PostgreSQL uses `workers = threads - 1`) |
 | `BENCHMARK_RUNS` | `3` | Number of runs per configuration |
 | `TABLE` | `bench_data` | Table name in each database |
 | `TIMEOUT_SECONDS` | `7200` | Per-benchmark timeout (2 hours) |
@@ -53,6 +53,7 @@ All settings are controlled via environment variables:
 | `HDD_BASE` | `/tank/local/riki/datasets` | HDD directory for long-term storage |
 | `DATABASES` | `duckdb postgres clickhouse` | Which databases to benchmark |
 | `RCLONE_REMOTE` | `gdrive:bench_results/gensort` | rclone destination for log uploads (empty to skip) |
+| `HOST_TAG` | hostname | Machine tag inserted into upload path (`<RCLONE_REMOTE>/<HOST_TAG>/...`) |
 
 ## Execution Flow
 
@@ -64,7 +65,7 @@ For each database (in order: duckdb, postgres, clickhouse):
    - ClickHouse: kill via PID file + pkill
 
 2. Check SSD space
-   - Warns if < 50GB available, continues anyway
+   - Warns if < 50GiB available, continues anyway
 
 3. Prepare data on SSD
    - If data already on SSD:  use it directly
@@ -92,23 +93,23 @@ For each database (in order: duckdb, postgres, clickhouse):
 
 ### DuckDB
 
-- **Data**: Single file (`$SSD_BASE/duckdb_bench.db`)
-- **Temp**: `$SSD_BASE/duckdb_temp/` (cleaned up after sweep)
-- **Sort binary**: `sort-duckdb --memory-limit 10GB --threads N`
+- **Data**: Single file (`$SSD_BASE/duckdb_bench_<dataset>.db`)
+- **Temp**: `$SSD_BASE/duckdb_temp_<dataset>/` (cleaned up after sweep)
+- **Sort binary**: `sort-duckdb --memory-limit 10GiB --threads N`
 - **Delegation**: Calls `sweep_duckdb_parallelism.sh` directly
 
 ### PostgreSQL
 
-- **Data**: Directory (`$SSD_BASE/postgres-data/`)
+- **Data**: Directory (`$SSD_BASE/postgres-data_<dataset>/`)
 - **Server**: Started with `max_worker_processes=128`, `max_parallel_workers=128`
-- **Sort binary**: `sort-postgres --total-memory 10GB --parallel-workers N`
+- **Sort binary**: `sort-postgres --total-memory 10GiB --parallel-workers N`
 - **Delegation**: Runs benchmark loop **inline** (not via `sweep_postgres_parallelism.sh`) to support plan deduplication (see below)
 
 ### ClickHouse
 
-- **Data**: Directory (`$SSD_BASE/clickhouse-data/`)
+- **Data**: Directory (`$SSD_BASE/clickhouse-data_<dataset>/`)
 - **Server**: Started with `--logger.level information` (needed for `PEAK_MEMORY` extraction)
-- **Sort binary**: `sort-clickhouse --memory-limit 10GB --threads N`
+- **Sort binary**: `sort-clickhouse --memory-limit 10GiB --threads N`
 - **Delegation**: Calls `sweep_clickhouse_parallelism.sh` directly
 
 ### Memory Enforcement
@@ -118,7 +119,7 @@ The `MEMORY_LIMIT` parameter is interpreted differently by each database:
 | Database | Setting | Enforcement |
 |----------|---------|-------------|
 | DuckDB | `SET memory_limit` | Hard cap on total query memory. DuckDB spills to disk or errors when exceeded. |
-| PostgreSQL | `SET work_mem = total_memory / workers` | Per-operator limit. Controls when each sort/hash spills to disk, but does not cap total query memory. |
+| PostgreSQL | `SET work_mem = total_memory / (workers + 1 leader)` | Per-operator limit per backend and per sort/hash node. Controls when each sort/hash spills to disk, but does not cap total query memory. |
 | ClickHouse | `max_bytes_before_external_sort` | Controls when sorting spills to disk, but `max_memory_usage` is **not** set, so total query memory is unbounded. |
 
 As a result, ClickHouse may use significantly more memory than the configured `MEMORY_LIMIT` for non-sort operations (e.g., reading, decompression, buffering), while DuckDB is the most strictly bounded.
@@ -127,24 +128,24 @@ As a result, ClickHouse may use significantly more memory than the configured `M
 
 ### The Problem
 
-PostgreSQL's sort-postgres binary configures the query planner with:
+PostgreSQL's `sort-postgres` binary configures the query planner with:
 
 ```
-work_mem = total_memory / parallel_workers
+work_mem = total_memory / (parallel_workers + 1)
 max_parallel_workers_per_gather = parallel_workers
 ```
 
-With a fixed total memory budget (e.g., 10GB), changing the worker count changes `work_mem`:
+With a fixed total memory budget (e.g., 10GiB), changing the worker count changes `work_mem`:
 
-| Workers | work_mem per worker |
-|---------|-------------------|
-| 4 | 2.5 GB |
-| 8 | 1.25 GB |
-| 16 | 640 MB |
-| 24 | ~427 MB |
-| 32 | 320 MB |
-| 40 | 256 MB |
-| 44 | ~232 MB |
+| Workers | Total processes (workers + leader) | work_mem per backend |
+|---------|-------------------------------------|----------------------|
+| 4 | 5 | 2.0 GiB |
+| 8 | 9 | ~1.11 GiB |
+| 16 | 17 | ~602 MiB |
+| 24 | 25 | ~410 MiB |
+| 32 | 33 | ~310 MiB |
+| 40 | 41 | ~250 MiB |
+| 44 | 45 | ~228 MiB |
 
 PostgreSQL's query planner may choose different execution strategies based on `work_mem` (e.g., in-memory quicksort vs. external merge sort). However, for some ranges of worker counts, the plan may be **identical** -- the optimizer makes the same choice despite the different `work_mem` values.
 
@@ -155,7 +156,7 @@ Running a full benchmark when the plan is identical is wasteful because:
 
 ### How It Works
 
-Before running any benchmark for a given worker count, the script:
+Before running any benchmark for a given thread count, the script:
 
 1. **Opens a read-only transaction** to PostgreSQL
 2. **Applies the same session settings** that `sort-postgres` would use:
@@ -169,8 +170,8 @@ Before running any benchmark for a given worker count, the script:
    SET LOCAL temp_file_limit = -1;
    ```
 3. **Runs `EXPLAIN`** (without `ANALYZE`) to get the planned execution strategy without actually executing the sort
-4. **Compares the plan text** with the previous worker count's plan
-5. **If identical**: skips all benchmark runs for this worker count and logs a `*_SKIPPED.log` file
+4. **Compares the plan text** with the previous thread count's plan
+5. **If identical**: skips all benchmark runs for this thread count and logs a `*_SKIPPED.log` file
 6. **If different**: proceeds with the full benchmark runs
 7. **Rolls back** the transaction (no side effects)
 
@@ -178,12 +179,12 @@ Before running any benchmark for a given worker count, the script:
 
 When plan deduplication triggers:
 ```
-[postgres] Checking plan for 8 workers...
-[postgres] SKIPPING 8 workers: plan identical to previous worker count.
+[postgres] Checking plan for 8 threads (7 workers + 1 leader)...
+[postgres] SKIPPING 8 threads: plan identical to previous thread count.
 [postgres] Plan dedup saved 3 benchmark run(s).
 ```
 
-The skip is recorded in `logs/postgres_parallelism_sweep_*/10GB_8workers_SKIPPED.log` with the full plan text for reference.
+The skip is recorded in `logs/postgres_parallelism_sweep_*/10GiB_8threads_7workers_SKIPPED.log` with the full plan text for reference.
 
 ### When Plans Differ
 
@@ -200,15 +201,15 @@ Logs are saved to `./logs/` with timestamped directories:
 ```
 logs/
   duckdb_parallelism_sweep_20260214_110542/
-    100MB_4threads_run1_20260214_110542.log
-    100MB_8threads_run1_20260214_110612.log
+    100MiB_4threads_run1_20260214_110542.log
+    100MiB_8threads_run1_20260214_110612.log
   postgres_parallelism_sweep_20260214_110541/
-    10GB_4workers_run1_20260214_110655.log
-    10GB_8workers_SKIPPED.log              # plan dedup
-    10GB_16workers_run1_20260214_111030.log
+    10GiB_4threads_3workers_run1_20260214_110655.log
+    10GiB_8threads_7workers_SKIPPED.log              # plan dedup
+    10GiB_16threads_15workers_run1_20260214_111030.log
   clickhouse_parallelism_sweep_20260214_110743/
-    10GB_4threads_run1_20260214_110743.log
-    10GB_8threads_run1_20260214_110813.log
+    10GiB_4threads_run1_20260214_110743.log
+    10GiB_8threads_run1_20260214_110813.log
 ```
 
 Each log file contains:
@@ -232,7 +233,7 @@ Caches are cleared at multiple levels to ensure consistent measurements:
 
 `run_both_datasets.sh` runs the full orchestrator twice:
 
-1. **gensort** (`gensort_200GiB.data`, format `gensort`) -- logs uploaded to `gdrive:bench_results/gensort/`
-2. **lineitem** (`lineitem_sf500.k-8-9-13-14-15.v-0-3.kvbin`, format `kvbin`) -- logs uploaded to `gdrive:bench_results/lineitem/`
+1. **gensort** (`gensort_200GiB.data`, format `gensort`) -- logs uploaded to `gdrive:bench_results/gensort/<host_tag>/`
+2. **lineitem** (`lineitem_sf500.k-8-9-13-14-15.v-0-3.kvbin`, format `kvbin`) -- logs uploaded to `gdrive:bench_results/lineitem/<host_tag>/`
 
 Between datasets, all database data is moved from SSD to HDD, so the SSD starts fresh for the next dataset's load.

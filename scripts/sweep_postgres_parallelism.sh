@@ -136,7 +136,7 @@ for W in $WORKER_COUNTS; do
     psql "$DB_CONNECTION" -c "DISCARD ALL" >/dev/null 2>&1 || true
 
     # Extract timing from output
-    DURATION=$(echo "$COMMAND_OUTPUT" | grep "TIMING:" | awk '{print $2}')
+    DURATION=$(echo "$COMMAND_OUTPUT" | grep "TIMING:" | awk '{print $2}' || true)
 
     # Write detailed log to individual file
     {

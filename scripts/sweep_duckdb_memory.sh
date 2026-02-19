@@ -129,7 +129,7 @@ for MEM in $MEMORY_LIMITS; do
     fi
 
     # Extract timing from output
-    DURATION=$(echo "$COMMAND_OUTPUT" | grep "TIMING:" | awk '{print $2}')
+    DURATION=$(echo "$COMMAND_OUTPUT" | grep "TIMING:" | awk '{print $2}' || true)
 
     # Write detailed log to individual file
     {

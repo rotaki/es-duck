@@ -133,7 +133,7 @@ for MEM in $MEMORY_LIMITS; do
     curl -sS "${CLICKHOUSE_URL}/?query=SYSTEM%20DROP%20COMPILED%20EXPRESSION%20CACHE" >/dev/null 2>&1 || true
 
     # Extract timing from output
-    DURATION=$(echo "$COMMAND_OUTPUT" | grep "TIMING:" | awk '{print $2}')
+    DURATION=$(echo "$COMMAND_OUTPUT" | grep "TIMING:" | awk '{print $2}' || true)
 
     # Write detailed log to individual file
     {

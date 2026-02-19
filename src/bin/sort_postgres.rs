@@ -13,8 +13,8 @@ struct Args {
     #[arg(long, default_value = "bench_data")]
     table: String,
 
-    /// TOTAL memory budget for the entire sort (e.g., "2GiB", "4GiB")
-    #[arg(long, default_value = "2GiB")]
+    /// TOTAL memory budget for the entire sort (e.g., "2GB", "4GB")
+    #[arg(long, default_value = "2GB")]
     total_memory: String,
 
     /// Number of parallel workers (Total processes = workers + 1)
@@ -26,30 +26,50 @@ struct Args {
     output: Option<String>,
 }
 
-/// Parses strings like "2GiB", "512MiB" into a numeric KiB value
+/// Parses strings like "2GB", "512MB" into a numeric KiB value
 fn parse_memory_to_kb(mem_str: &str) -> Result<i64, Box<dyn Error>> {
     let s = mem_str.to_uppercase();
-    if s.ends_with("GIB") {
-        let val: f64 = s.trim_end_matches("GIB").parse()?;
+    if s.ends_with("GIB") || s.ends_with("GB") || s.ends_with('G') {
+        let val: f64 = s
+            .trim_end_matches("GIB")
+            .trim_end_matches("GB")
+            .trim_end_matches('G')
+            .parse()?;
         Ok((val * 1024.0 * 1024.0) as i64)
-    } else if s.ends_with("MIB") {
-        let val: f64 = s.trim_end_matches("MIB").parse()?;
+    } else if s.ends_with("MIB") || s.ends_with("MB") || s.ends_with('M') {
+        let val: f64 = s
+            .trim_end_matches("MIB")
+            .trim_end_matches("MB")
+            .trim_end_matches('M')
+            .parse()?;
         Ok((val * 1024.0) as i64)
+    } else if s.ends_with("KIB") || s.ends_with("KB") || s.ends_with('K') {
+        let val: f64 = s
+            .trim_end_matches("KIB")
+            .trim_end_matches("KB")
+            .trim_end_matches('K')
+            .parse()?;
+        Ok(val as i64)
     } else {
-        Err("Unsupported memory format. Use GiB or MiB (e.g., '2GiB')".into())
+        Err("Unsupported memory format. Use GB or MB (e.g., '2GB')".into())
     }
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
 
-    // 1. CALCULATE WORK_MEM PER WORKER
-    // NOTE: PostgreSQL parallel query uses N workers + 1 leader process
-    // For example, --parallel-workers=40 creates 41 total processes (40 workers + 1 leader)
-    // We divide total memory budget by N (the parallel_workers parameter) to get work_mem
+    // 1. CALCULATE WORK_MEM PER BACKEND PROCESS
+    // PostgreSQL parallel query uses N workers + 1 leader process.
+    // To keep a fixed total-process budget, divide by (workers + leader).
+    if args.parallel_workers < 0 {
+        return Err("parallel-workers must be >= 0".into());
+    }
     let total_procs = args.parallel_workers + 1;
+    if total_procs <= 0 {
+        return Err("Invalid process count derived from parallel-workers".into());
+    }
     let total_kb = parse_memory_to_kb(&args.total_memory)?;
-    let work_mem_kb = total_kb / args.parallel_workers as i64;
+    let work_mem_kb = total_kb / total_procs as i64;
     let work_mem_setting = format!("{}kB", work_mem_kb);
 
     let mut client = Client::connect(&args.db, NoTls)?;
@@ -62,7 +82,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         "Total Budget: {} | Workers: {} | Total Processes: {} (workers + 1 leader)",
         args.total_memory, args.parallel_workers, total_procs
     );
-    println!("Calculated work_mem per worker: {}", work_mem_setting);
+    println!(
+        "Calculated work_mem per backend process (worker/leader): {}",
+        work_mem_setting
+    );
+    println!(
+        "Note: work_mem is per backend per sort/hash node; total memory can exceed this estimate."
+    );
 
     client.batch_execute(&format!("SET LOCAL work_mem = '{}'", work_mem_setting))?;
     client.batch_execute(&format!(
