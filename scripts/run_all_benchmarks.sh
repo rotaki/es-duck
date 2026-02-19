@@ -449,8 +449,7 @@ cgroup_memory_limit_bytes() {
         return 1
     fi
 
-    # Enforce cgroup limit at 120% of benchmark memory budget.
-    echo $((base_bytes * 120 / 100))
+    echo "$base_bytes"
 }
 
 verify_pid_in_cgroup_scope() {
