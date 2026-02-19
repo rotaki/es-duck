@@ -20,9 +20,10 @@ struct Args {
     #[arg(long)]
     temp_dir: Option<PathBuf>,
 
-    /// Memory limit for DuckDB (e.g., "1GiB", "512MiB")
-    #[arg(long, default_value = "1GiB")]
-    memory_limit: String,
+    /// Memory limit for DuckDB (e.g., "1GiB", "512MiB"). If not set, DuckDB auto-detects
+    /// from cgroup v2 memory.max (uses 80% of it) or falls back to 80% of physical RAM.
+    #[arg(long)]
+    memory_limit: Option<String>,
 
     /// Number of threads for DuckDB to use
     #[arg(long)]
@@ -61,8 +62,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     // Set memory limit
-    println!("Setting memory_limit to {}", args.memory_limit);
-    conn.execute(&format!("SET memory_limit = '{}';", args.memory_limit), [])?;
+    if let Some(ref memory_limit) = args.memory_limit {
+        println!("Setting memory_limit to {}", memory_limit);
+        conn.execute(&format!("SET memory_limit = '{}';", memory_limit), [])?;
+    } else {
+        println!("No memory_limit set; DuckDB will use 80% of cgroup/physical RAM.");
+    }
 
     // Print active settings to confirm configuration is applied correctly
     {
@@ -82,24 +87,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!("===================================\n");
     }
 
-    // Get table statistics
-    println!("Gathering table statistics...");
-    let row_count: i64 =
-        conn.query_row(&format!("SELECT COUNT(*) FROM {}", args.table), [], |row| {
-            row.get(0)
-        })?;
-
-    // Get database file size directly from filesystem
-    let db_metadata = std::fs::metadata(&args.db)?;
-    let table_size_bytes = db_metadata.len();
-
-    println!("Table: {}", args.table);
-    println!("Row count: {}", row_count);
-    println!(
-        "Database size: {} bytes ({:.2} GiB)",
-        table_size_bytes,
-        table_size_bytes as f64 / 1_073_741_824.0
-    );
     // Quote table name as an identifier: "foo""bar"
     let table = format!("\"{}\"", args.table.replace('"', "\"\""));
     let select_query = format!("SELECT sort_key, payload FROM {} ORDER BY sort_key", table);

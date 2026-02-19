@@ -97,7 +97,6 @@ for MEM in $MEMORY_LIMITS; do
             --url "$CLICKHOUSE_URL" \
             --database "$DATABASE" \
             --table "$TABLE" \
-            --memory-limit "$MEM" \
             --threads "$THREADS" \
             --output "$OUTPUT" 2>&1 | tee "$TEMP_OUTPUT"
     else
@@ -106,7 +105,6 @@ for MEM in $MEMORY_LIMITS; do
             --url "$CLICKHOUSE_URL" \
             --database "$DATABASE" \
             --table "$TABLE" \
-            --memory-limit "$MEM" \
             --threads "$THREADS" 2>&1 | tee "$TEMP_OUTPUT"
     fi
 

@@ -13,9 +13,10 @@ struct Args {
     #[arg(long, default_value = "bench_data")]
     table: String,
 
-    /// TOTAL memory budget for the entire sort (e.g., "2GB", "4GB")
-    #[arg(long, default_value = "2GB")]
-    total_memory: String,
+    /// TOTAL memory budget for the entire sort (e.g., "2GB", "4GB"). If not set, uses
+    /// PostgreSQL's server default work_mem (typically 4MB); cgroup acts as OOM kill boundary.
+    #[arg(long)]
+    total_memory: Option<String>,
 
     /// Number of parallel workers (Total processes = workers + 1)
     #[arg(long, default_value = "7")]
@@ -68,9 +69,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     if total_procs <= 0 {
         return Err("Invalid process count derived from parallel-workers".into());
     }
-    let total_kb = parse_memory_to_kb(&args.total_memory)?;
-    let work_mem_kb = total_kb / total_procs as i64;
-    let work_mem_setting = format!("{}kB", work_mem_kb);
 
     let mut client = Client::connect(&args.db, NoTls)?;
 
@@ -78,19 +76,30 @@ fn main() -> Result<(), Box<dyn Error>> {
     client.batch_execute("SET LOCAL transaction_read_only = on")?;
 
     // 2. APPLY CALCULATED SETTINGS
-    println!(
-        "Total Budget: {} | Workers: {} | Total Processes: {} (workers + 1 leader)",
-        args.total_memory, args.parallel_workers, total_procs
-    );
-    println!(
-        "Calculated work_mem per backend process (worker/leader): {}",
-        work_mem_setting
-    );
-    println!(
-        "Note: work_mem is per backend per sort/hash node; total memory can exceed this estimate."
-    );
+    if let Some(ref total_memory) = args.total_memory {
+        let total_kb = parse_memory_to_kb(total_memory)?;
+        let work_mem_kb = total_kb / total_procs as i64;
+        let work_mem_setting = format!("{}kB", work_mem_kb);
 
-    client.batch_execute(&format!("SET LOCAL work_mem = '{}'", work_mem_setting))?;
+        println!(
+            "Total Budget: {} | Workers: {} | Total Processes: {} (workers + 1 leader)",
+            total_memory, args.parallel_workers, total_procs
+        );
+        println!(
+            "Calculated work_mem per backend process (worker/leader): {}",
+            work_mem_setting
+        );
+        println!(
+            "Note: work_mem is per backend per sort/hash node; total memory can exceed this estimate."
+        );
+
+        client.batch_execute(&format!("SET LOCAL work_mem = '{}'", work_mem_setting))?;
+    } else {
+        println!(
+            "No total_memory set; using PostgreSQL default work_mem. Cgroup acts as OOM kill boundary."
+        );
+    }
+
     client.batch_execute(&format!(
         "SET LOCAL max_parallel_workers_per_gather = {}",
         args.parallel_workers
@@ -103,26 +112,23 @@ fn main() -> Result<(), Box<dyn Error>> {
     client.batch_execute("SET LOCAL enable_parallel_append = on")?;
     client.batch_execute("SET LOCAL temp_file_limit = -1")?;
 
-    // --- Gather and print table statistics ---
-    println!("\nGathering table statistics...");
-
-    let row_count: i64 = client
-        .query_one(&format!("SELECT COUNT(*) FROM {}", args.table), &[])?
-        .get(0);
-
-    let table_size: i64 = client
-        .query_one(
-            &format!("SELECT pg_total_relation_size('{}')", args.table),
+    // Print active settings
+    {
+        let rows = client.query(
+            "SELECT name, setting, unit FROM pg_settings \
+             WHERE name IN ('work_mem', 'max_parallel_workers_per_gather', 'temp_file_limit', 'max_parallel_workers') \
+             ORDER BY name",
             &[],
-        )?
-        .get(0);
-
-    let size_gib = table_size as f64 / (1024.0 * 1024.0 * 1024.0);
-
-    println!("Table: {}", args.table);
-    println!("Row count: {}", row_count);
-    println!("Size: {:.2} GiB", size_gib);
-    println!();
+        )?;
+        println!("\n===== POSTGRES ACTIVE SETTINGS =====");
+        for row in &rows {
+            let name: &str = row.get(0);
+            let setting: &str = row.get(1);
+            let unit: Option<&str> = row.get(2);
+            println!("  {}: {}{}", name, setting, unit.unwrap_or(""));
+        }
+        println!("=====================================\n");
+    }
 
     // Build the actual query based on mode
     if let Some(ref output_path) = args.output {

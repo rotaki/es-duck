@@ -326,7 +326,7 @@ preflight_checks() {
     require_command grep "plan/timing extraction"
     require_command tee "stream benchmark output to logs"
     require_command df "SSD capacity checks"
-    require_command mv "move DB data between SSD/HDD"
+    require_command cp "copy DB data from HDD to SSD"
     require_command sync "flush data to disk"
     require_command curl "health checks and binary downloads"
 
@@ -708,13 +708,13 @@ prepare_data_on_ssd() {
     fi
 
     if [[ -e "$hdd_path" ]]; then
-        echo "[data] Moving $db_type data from HDD to SSD..."
+        echo "[data] Copying $db_type data from HDD to SSD..."
         echo "[data]   From: $hdd_path"
         echo "[data]   To:   $ssd_path"
         mkdir -p "$(dirname "$ssd_path")"
-        mv "$hdd_path" "$ssd_path"
+        cp -r "$hdd_path" "$ssd_path"
         sync
-        echo "[data] Move complete."
+        echo "[data] Copy complete."
         return 0
     fi
 
@@ -778,27 +778,24 @@ prepare_data_on_ssd() {
     esac
 }
 
-# Move data from SSD to HDD after benchmarking.
+# Delete data from SSD after benchmarking (canonical copy remains on HDD).
 # Usage: move_data_to_hdd <db_type>
 move_data_to_hdd() {
     local db_type="$1"
-    local ssd_path hdd_path
+    local ssd_path
 
     ssd_path=$(dataset_db_path "$SSD_BASE" "$db_type")
-    hdd_path=$(dataset_db_path "$HDD_BASE" "$db_type")
 
     if [[ ! -e "$ssd_path" ]]; then
-        echo "[data] No data on SSD to move for $db_type."
+        echo "[data] No data on SSD to remove for $db_type."
         return 0
     fi
 
-    echo "[data] Moving $db_type data from SSD to HDD..."
-    echo "[data]   From: $ssd_path"
-    echo "[data]   To:   $hdd_path"
-    mkdir -p "$(dirname "$hdd_path")"
-    mv "$ssd_path" "$hdd_path"
+    echo "[data] Removing $db_type data from SSD (HDD copy retained)..."
+    echo "[data]   Deleting: $ssd_path"
+    rm -rf "$ssd_path"
     sync
-    echo "[data] Move complete."
+    echo "[data] Removal complete."
 }
 
 # Get PostgreSQL query plan for a given parallel worker count (without executing).
@@ -807,18 +804,15 @@ move_data_to_hdd() {
 get_postgres_plan() {
     local workers="$1"
     local db_conn="$2"
-    local total_bytes total_kb
+    local total_bytes total_kb work_mem_kb
 
-    # Parse memory to KiB (matching sort_postgres.rs logic).
-    # Accepts GiB/MiB units (plus legacy suffixes and shorthand G/M).
+    # Calculate work_mem matching sort_postgres.rs logic: total / (workers + 1 leader).
     if ! total_bytes=$(parse_memory_to_bytes "$MEMORY_LIMIT"); then
-        echo "ERROR: Cannot parse MEMORY_LIMIT=$MEMORY_LIMIT (expected GiB or MiB, e.g. '10GiB')" >&2
+        echo "ERROR: Cannot parse MEMORY_LIMIT=$MEMORY_LIMIT" >&2
         return 1
     fi
     total_kb=$((total_bytes / 1024))
-
-    local total_procs=$((workers + 1))
-    local work_mem_kb=$((total_kb / total_procs))
+    work_mem_kb=$((total_kb / (workers + 1)))
 
     psql "$db_conn" -tA <<EOF
 BEGIN;
@@ -1010,13 +1004,13 @@ run_postgres_benchmark() {
                 echo "========================================="
                 echo "PostgreSQL Parallelism Sweep - SKIPPED (identical plan)"
                 echo "========================================="
-                echo "Configuration: total_memory=$MEMORY_LIMIT, threads=$T, parallel_workers=$W, total_processes=$TOTAL_PROCS"
+                echo "Configuration: cgroup_memory=$MEMORY_LIMIT, threads=$T, parallel_workers=$W, total_processes=$TOTAL_PROCS"
                 echo "Reason: Plan identical to previous thread count"
                 echo "Time: $(date +"%Y-%m-%d %H:%M:%S")"
                 echo ""
                 echo "Plan:"
                 echo "$current_plan"
-            } > "${LOG_DIR}/${MEMORY_LIMIT}_${T}threads_${W}workers_SKIPPED.log"
+            } > "${LOG_DIR}/${MEMORY_LIMIT}_${T}threads_${W}workers_SKIPPED.log"  # MEMORY_LIMIT = cgroup limit
 
             upload_log_file "${LOG_DIR}/${MEMORY_LIMIT}_${T}threads_${W}workers_SKIPPED.log" "$LOG_DIR"
 
@@ -1033,7 +1027,7 @@ run_postgres_benchmark() {
         # Run benchmarks for this thread count (adapted from sweep_postgres_parallelism.sh)
         for RUN in $(seq 1 "$BENCHMARK_RUNS"); do
             RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-            LOG_FILE="${LOG_DIR}/${MEMORY_LIMIT}_${T}threads_${W}workers_run${RUN}_${RUN_TIMESTAMP}.log"
+            LOG_FILE="${LOG_DIR}/${MEMORY_LIMIT}_${T}threads_${W}workers_run${RUN}_${RUN_TIMESTAMP}.log"  # MEMORY_LIMIT = cgroup limit
             TEMP_OUTPUT="/tmp/postgres_sweep_${T}threads_${W}workers_run${RUN}_${RUN_TIMESTAMP}.log"
 
             echo "========================================="
@@ -1082,7 +1076,7 @@ run_postgres_benchmark() {
                 echo "========================================="
                 echo "PostgreSQL Parallelism Sweep - Configuration Log"
                 echo "========================================="
-                echo "Configuration: total_memory=$MEMORY_LIMIT, threads=$T, parallel_workers=$W, total_processes=$TOTAL_PROCS, run=$RUN/$BENCHMARK_RUNS"
+                echo "Configuration: cgroup_memory=$MEMORY_LIMIT, threads=$T, parallel_workers=$W, total_processes=$TOTAL_PROCS, run=$RUN/$BENCHMARK_RUNS"
                 echo "Database: $db_conn"
                 echo "Table: $TABLE"
                 echo "Timeout: ${TIMEOUT_SECONDS}s"
@@ -1109,7 +1103,7 @@ run_postgres_benchmark() {
                 echo "========================================="
                 if [[ -n "$DURATION" ]]; then
                     echo "Duration: ${DURATION}s"
-                    echo "Result: $MEMORY_LIMIT,$W,$RUN,$DURATION"
+                    echo "Result: $MEMORY_LIMIT,$W,$RUN,$DURATION"  # MEMORY_LIMIT = cgroup limit
                 else
                     echo "WARNING: Could not extract timing information"
                 fi
@@ -1124,7 +1118,7 @@ run_postgres_benchmark() {
             echo ""
             echo "========================================="
             if [[ -n "$DURATION" ]]; then
-                echo "Result logged: total_memory=$MEMORY_LIMIT, threads=$T, parallel_workers=$W, run=$RUN/$BENCHMARK_RUNS, duration=${DURATION}s"
+                echo "Result logged: cgroup_memory=$MEMORY_LIMIT, threads=$T, parallel_workers=$W, run=$RUN/$BENCHMARK_RUNS, duration=${DURATION}s"
             else
                 echo "Warning: Could not extract timing information"
             fi
@@ -1241,5 +1235,5 @@ echo ""
 echo "========================================================"
 echo "  All benchmarks complete!"
 echo "========================================================"
-echo "Data has been moved to HDD: $HDD_BASE"
+echo "SSD data removed; canonical copies remain on HDD: $HDD_BASE"
 echo "Logs are in: ./logs/"

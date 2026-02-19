@@ -12,7 +12,7 @@ INPUT_FILE="${INPUT_FILE:-testdata/test_gensort.dat}"
 FORMAT="${FORMAT:-gensort}"
 DB_FILE="${DB_FILE:-./duckdb_bench.db}"
 TABLE="${TABLE:-bench_data}"
-MEMORY_LIMIT="${MEMORY_LIMIT:-100GB}"
+MEMORY_LIMIT="${MEMORY_LIMIT:-10GiB}"
 TEMP_DIR="${TEMP_DIR:-./duckdb_temp}"
 # THREAD_COUNTS="${THREAD_COUNTS:-4 8 16 24 32 40 44}"
 THREAD_COUNTS="${THREAD_COUNTS:-44 40 32 24 16 8 4}"
@@ -50,7 +50,7 @@ echo "Input: $INPUT_FILE"
 echo "Format: $FORMAT"
 echo "Database: $DB_FILE"
 echo "Table: $TABLE"
-echo "Memory limit: $MEMORY_LIMIT"
+echo "Cgroup memory limit: $MEMORY_LIMIT"
 echo "Thread counts: $THREAD_COUNTS"
 echo "Timeout: ${TIMEOUT_SECONDS}s"
 echo "Benchmark runs per config: $BENCHMARK_RUNS"
@@ -121,7 +121,6 @@ for T in $THREAD_COUNTS; do
         timeout $TIMEOUT_SECONDS cargo run --release --bin sort-duckdb --features db-duckdb -- \
             --db "$DB_FILE" \
             --table "$TABLE" \
-            --memory-limit "$MEMORY_LIMIT" \
             --temp-dir "$TEMP_DIR" \
             --threads "$T" \
             --output "$OUTPUT" 2>&1 | tee "$TEMP_OUTPUT"
@@ -130,7 +129,6 @@ for T in $THREAD_COUNTS; do
         timeout $TIMEOUT_SECONDS cargo run --release --bin sort-duckdb --features db-duckdb -- \
             --db "$DB_FILE" \
             --table "$TABLE" \
-            --memory-limit "$MEMORY_LIMIT" \
             --temp-dir "$TEMP_DIR" \
             --threads "$T" 2>&1 | tee "$TEMP_OUTPUT"
     fi
@@ -164,7 +162,7 @@ for T in $THREAD_COUNTS; do
         echo "========================================="
         echo "DuckDB Parallelism Sweep - Configuration Log"
         echo "========================================="
-        echo "Configuration: memory_limit=$MEMORY_LIMIT, threads=$T, run=$RUN/$BENCHMARK_RUNS"
+        echo "Configuration: cgroup_memory=$MEMORY_LIMIT, threads=$T, run=$RUN/$BENCHMARK_RUNS"
         echo "Input: $INPUT_FILE"
         echo "Database: $DB_FILE"
         echo "Table: $TABLE"
@@ -210,7 +208,7 @@ for T in $THREAD_COUNTS; do
     echo ""
     echo "========================================="
     if [ -n "$DURATION" ]; then
-        echo "✓ Result logged: memory_limit=$MEMORY_LIMIT, threads=$T, run=$RUN/$BENCHMARK_RUNS, duration=${DURATION}s"
+        echo "✓ Result logged: cgroup_memory=$MEMORY_LIMIT, threads=$T, run=$RUN/$BENCHMARK_RUNS, duration=${DURATION}s"
     else
         echo "✗ Warning: Could not extract timing information"
     fi

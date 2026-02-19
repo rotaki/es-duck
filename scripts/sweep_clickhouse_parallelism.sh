@@ -14,7 +14,7 @@ CLICKHOUSE_URL="${CLICKHOUSE_URL:-http://localhost:8123}"
 DATABASE="${DATABASE:-default}"
 TABLE="${TABLE:-bench_data}"
 # Support both TOTAL_MEMORY and MEMORY_LIMIT (backward compatibility)
-TOTAL_MEMORY="${TOTAL_MEMORY:-${MEMORY_LIMIT:-2GB}}"
+TOTAL_MEMORY="${TOTAL_MEMORY:-${MEMORY_LIMIT:-10GiB}}"
 # THREAD_COUNTS="${THREAD_COUNTS:-4 8 16 24 32 40 44}"
 THREAD_COUNTS="${THREAD_COUNTS:-4}"
 LOG_DIR="${LOG_DIR:-./logs/clickhouse_parallelism_sweep_${SWEEP_TIMESTAMP}}"
@@ -52,7 +52,7 @@ echo "Format: $FORMAT"
 echo "ClickHouse URL: $CLICKHOUSE_URL"
 echo "Database: $DATABASE"
 echo "Table: $TABLE"
-echo "Total memory budget: $TOTAL_MEMORY"
+echo "Cgroup memory limit: $TOTAL_MEMORY"
 echo "Thread counts: $THREAD_COUNTS"
 echo "Timeout: ${TIMEOUT_SECONDS}s"
 echo "Benchmark runs per config: $BENCHMARK_RUNS"
@@ -116,8 +116,8 @@ for THREADS in $THREAD_COUNTS; do
             --url "$CLICKHOUSE_URL" \
             --database "$DATABASE" \
             --table "$TABLE" \
-            --memory-limit "$TOTAL_MEMORY" \
             --threads "$THREADS" \
+            --memory-limit "$TOTAL_MEMORY" \
             --output "$OUTPUT" 2>&1 | tee "$TEMP_OUTPUT"
     else
         # Count mode
@@ -125,8 +125,8 @@ for THREADS in $THREAD_COUNTS; do
             --url "$CLICKHOUSE_URL" \
             --database "$DATABASE" \
             --table "$TABLE" \
-            --memory-limit "$TOTAL_MEMORY" \
-            --threads "$THREADS" 2>&1 | tee "$TEMP_OUTPUT"
+            --threads "$THREADS" \
+            --memory-limit "$TOTAL_MEMORY" 2>&1 | tee "$TEMP_OUTPUT"
     fi
 
     EXIT_CODE=${PIPESTATUS[0]}
@@ -164,7 +164,7 @@ for THREADS in $THREAD_COUNTS; do
         echo "========================================="
         echo "ClickHouse Parallelism Sweep - Configuration Log"
         echo "========================================="
-        echo "Configuration: memory_limit=$TOTAL_MEMORY, threads=$THREADS, run=$RUN/$BENCHMARK_RUNS"
+        echo "Configuration: cgroup_memory=$TOTAL_MEMORY, threads=$THREADS, run=$RUN/$BENCHMARK_RUNS"
         echo "Input: $INPUT_FILE"
         echo "ClickHouse URL: $CLICKHOUSE_URL"
         echo "Database: $DATABASE"
@@ -210,7 +210,7 @@ for THREADS in $THREAD_COUNTS; do
     echo ""
     echo "========================================="
     if [ -n "$DURATION" ]; then
-        echo "✓ Result logged: memory_limit=$TOTAL_MEMORY, threads=$THREADS, run=$RUN/$BENCHMARK_RUNS, duration=${DURATION}s"
+        echo "✓ Result logged: cgroup_memory=$TOTAL_MEMORY, threads=$THREADS, run=$RUN/$BENCHMARK_RUNS, duration=${DURATION}s"
     else
         echo "✗ Warning: Could not extract timing information"
     fi

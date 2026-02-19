@@ -51,9 +51,10 @@ struct Args {
     #[arg(long, default_value = "bench_data")]
     table: String,
 
-    /// Memory limit for external sorting (e.g., "1GB", "512MB")
-    #[arg(long, default_value = "1GB")]
-    memory_limit: String,
+    /// Memory limit for external sorting (e.g., "1GB", "512MB"). If not set, ClickHouse uses
+    /// max_server_memory_usage (90% of cgroup v2 memory.max if detected, else 90% of physical RAM).
+    #[arg(long)]
+    memory_limit: Option<String>,
 
     #[arg(long)]
     threads: Option<usize>,
@@ -72,55 +73,39 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .with_url(&args.url)
         .with_database(&args.database);
 
-    // Get table statistics
-    println!("Gathering table statistics...");
-    let row_count: u64 = client
-        .query(&format!("SELECT COUNT(*) FROM {}", args.table))
-        .fetch_one::<u64>()
-        .await?;
-
-    // Get approximate table size
-    let table_size_bytes: u64 = client
-        .query(&format!(
-            "SELECT sum(bytes_on_disk) FROM system.parts WHERE database = '{}' AND table = '{}'",
-            args.database, args.table
-        ))
-        .fetch_one::<u64>()
-        .await
-        .unwrap_or(0);
-
-    println!("Table: {}", args.table);
-    println!("Row count: {}", row_count);
-    println!(
-        "Table size: {} bytes ({:.2} GiB)",
-        table_size_bytes,
-        table_size_bytes as f64 / 1_073_741_824.0
-    );
-
-    // Parse memory limit
-    let max_bytes = parse_memory_to_bytes(&args.memory_limit)?;
-    println!("Parsed memory limit: {} bytes", max_bytes);
-
     // Build settings
     let mut settings = Vec::new();
     if let Some(threads) = args.threads {
         println!("Setting max_threads to {}", threads);
         settings.push(format!("max_threads = {}", threads));
     }
-    settings.push(format!("max_bytes_before_external_sort = {}", max_bytes));
-    settings.push(format!("max_bytes_ratio_before_external_sort = 0"));
-    println!(
-        "Setting max_bytes_before_external_sort to {} bytes",
-        max_bytes
-    );
-    // settings.push(format!("max_memory_usage = {}", max_bytes));
-    // println!("Setting max_memory_usage to {} bytes", max_bytes);
+    if let Some(ref memory_limit) = args.memory_limit {
+        let cgroup_bytes = parse_memory_to_bytes(memory_limit)?;
+        let max_bytes = cgroup_bytes / 2;
+        println!("Parsed cgroup memory limit: {} bytes", cgroup_bytes);
+        println!("Setting max_bytes_before_external_sort to 50% = {} bytes", max_bytes);
+        settings.push(format!("max_bytes_before_external_sort = {}", max_bytes));
+        settings.push(format!("max_bytes_ratio_before_external_sort = 0"));
+    } else {
+        println!("No memory_limit set; ClickHouse uses 90% of cgroup/physical RAM (max_server_memory_usage).");
+    }
 
     let settings_clause = if settings.is_empty() {
         String::new()
     } else {
         format!("SETTINGS {}", settings.join(", "))
     };
+
+    // Print active per-query settings
+    println!("\n===== CLICKHOUSE QUERY SETTINGS =====");
+    if settings.is_empty() {
+        println!("  (no explicit settings; using server defaults)");
+    } else {
+        for s in &settings {
+            println!("  {}", s);
+        }
+    }
+    println!("=====================================\n");
 
     // Build the query
     let select_query = format!(

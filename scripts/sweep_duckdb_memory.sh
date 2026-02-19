@@ -98,7 +98,6 @@ for MEM in $MEMORY_LIMITS; do
         timeout $TIMEOUT_SECONDS cargo run --release --bin sort-duckdb --features db-duckdb -- \
             --db "$DB_FILE" \
             --table "$TABLE" \
-            --memory-limit "$MEM" \
             --temp-dir "$TEMP_DIR" \
             --threads "$THREADS" \
             --output "$OUTPUT" 2>&1 | tee "$TEMP_OUTPUT"
@@ -107,7 +106,6 @@ for MEM in $MEMORY_LIMITS; do
         timeout $TIMEOUT_SECONDS cargo run --release --bin sort-duckdb --features db-duckdb -- \
             --db "$DB_FILE" \
             --table "$TABLE" \
-            --memory-limit "$MEM" \
             --temp-dir "$TEMP_DIR" \
             --threads "$THREADS" 2>&1 | tee "$TEMP_OUTPUT"
     fi

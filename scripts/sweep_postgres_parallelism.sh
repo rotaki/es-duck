@@ -13,7 +13,7 @@ FORMAT="${FORMAT:-gensort}"
 DB_CONNECTION="${DB_CONNECTION:-postgres://postgres@localhost:5433/bench}"
 TABLE="${TABLE:-bench_data}"
 # Support both TOTAL_MEMORY and WORK_MEM (backward compatibility)
-TOTAL_MEMORY="${TOTAL_MEMORY:-${WORK_MEM:-2GB}}"
+TOTAL_MEMORY="${TOTAL_MEMORY:-${WORK_MEM:-10GiB}}"
 # WORKER_COUNTS="${WORKER_COUNTS:-4 8 16 24 32 40 44}"
 WORKER_COUNTS="${WORKER_COUNTS:-4}"
 LOG_DIR="${LOG_DIR:-./logs/postgres_parallelism_sweep_${SWEEP_TIMESTAMP}}"
@@ -27,7 +27,7 @@ echo "Input: $INPUT_FILE"
 echo "Format: $FORMAT"
 echo "Database: $DB_CONNECTION"
 echo "Table: $TABLE"
-echo "Total memory budget: $TOTAL_MEMORY"
+echo "Cgroup memory limit: $TOTAL_MEMORY"
 echo "Worker counts: $WORKER_COUNTS"
 echo "Timeout: ${TIMEOUT_SECONDS}s"
 echo "Benchmark runs per config: $BENCHMARK_RUNS"
@@ -143,7 +143,7 @@ for W in $WORKER_COUNTS; do
         echo "========================================="
         echo "PostgreSQL Parallelism Sweep - Configuration Log"
         echo "========================================="
-        echo "Configuration: total_memory=$TOTAL_MEMORY, parallel_workers=$W, run=$RUN/$BENCHMARK_RUNS"
+        echo "Configuration: cgroup_memory=$TOTAL_MEMORY, parallel_workers=$W, run=$RUN/$BENCHMARK_RUNS"
         echo "Input: $INPUT_FILE"
         echo "Database: $DB_CONNECTION"
         echo "Table: $TABLE"
@@ -169,7 +169,7 @@ for W in $WORKER_COUNTS; do
         echo "========================================="
         if [ -n "$DURATION" ]; then
             echo "Duration: ${DURATION}s"
-            echo "Result: $TOTAL_MEMORY,$W,$RUN,$DURATION"
+            echo "Result: $TOTAL_MEMORY,$W,$RUN,$DURATION"  # TOTAL_MEMORY = cgroup limit
         else
             echo "WARNING: Could not extract timing information"
         fi
@@ -184,7 +184,7 @@ for W in $WORKER_COUNTS; do
     echo ""
     echo "========================================="
     if [ -n "$DURATION" ]; then
-        echo "✓ Result logged: total_memory=$TOTAL_MEMORY, parallel_workers=$W, run=$RUN/$BENCHMARK_RUNS, duration=${DURATION}s"
+        echo "✓ Result logged: cgroup_memory=$TOTAL_MEMORY, parallel_workers=$W, run=$RUN/$BENCHMARK_RUNS, duration=${DURATION}s"
     else
         echo "✗ Warning: Could not extract timing information"
     fi
