@@ -135,10 +135,15 @@ for THREADS in $THREAD_COUNTS; do
     # Read captured output
     COMMAND_OUTPUT=$(cat "$TEMP_OUTPUT")
 
-    # Check timeout - skip remaining runs for this configuration
+    # Check timeout or OOM kill - skip remaining runs for this configuration
     if [ $EXIT_CODE -eq 124 ]; then
         echo ""
         echo "WARNING: Process timed out after ${TIMEOUT_SECONDS}s"
+        echo "Skipping remaining benchmark runs for $THREADS threads..."
+        SKIP_REMAINING=true
+    elif [ $EXIT_CODE -eq 137 ]; then
+        echo ""
+        echo "WARNING: Process killed by memory manager (OOM kill, exit 137)"
         echo "Skipping remaining benchmark runs for $THREADS threads..."
         SKIP_REMAINING=true
     else
@@ -172,6 +177,8 @@ for THREADS in $THREAD_COUNTS; do
             echo "Status: SUCCESS"
         elif [ $EXIT_CODE -eq 124 ]; then
             echo "Status: TIMEOUT"
+        elif [ $EXIT_CODE -eq 137 ]; then
+            echo "Status: OOM_KILLED"
         else
             echo "Status: FAILED"
         fi

@@ -1063,6 +1063,11 @@ run_postgres_benchmark() {
                 echo "WARNING: Process timed out after ${TIMEOUT_SECONDS}s"
                 echo "Skipping remaining benchmark runs for $T threads..."
                 SKIP_REMAINING=true
+            elif [[ $EXIT_CODE -eq 137 ]]; then
+                echo ""
+                echo "WARNING: Process killed by memory manager (OOM kill, exit 137)"
+                echo "Skipping remaining benchmark runs for $T threads..."
+                SKIP_REMAINING=true
             fi
 
             # Clear PostgreSQL caches
@@ -1088,6 +1093,8 @@ run_postgres_benchmark() {
                     echo "Status: SUCCESS"
                 elif [[ $EXIT_CODE -eq 124 ]]; then
                     echo "Status: TIMEOUT"
+                elif [[ $EXIT_CODE -eq 137 ]]; then
+                    echo "Status: OOM_KILLED"
                 else
                     echo "Status: FAILED"
                 fi
