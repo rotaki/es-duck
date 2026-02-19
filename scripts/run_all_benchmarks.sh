@@ -348,8 +348,8 @@ preflight_checks() {
         fi
     fi
 
-    if [[ ! -x "$CLEAR_CACHE_SCRIPT" ]]; then
-        add_preflight_warning "cache-clear script not executable: $CLEAR_CACHE_SCRIPT (system cache drop will be skipped)"
+    if [[ ! -f "$CLEAR_CACHE_SCRIPT" ]]; then
+        add_preflight_warning "cache-clear script not found: $CLEAR_CACHE_SCRIPT (system cache drop will be skipped)"
     fi
 
     if [[ -n "${RCLONE_REMOTE:-}" ]] && ! command -v rclone >/dev/null 2>&1; then
@@ -889,7 +889,7 @@ upload_log_file() {
 }
 
 clear_system_caches() {
-    if [[ -x "$CLEAR_CACHE_SCRIPT" ]]; then
+    if [[ -f "$CLEAR_CACHE_SCRIPT" ]]; then
         echo "[cache] Clearing system caches..."
         sudo "$CLEAR_CACHE_SCRIPT" || echo "Warning: Failed to clear caches"
     else
