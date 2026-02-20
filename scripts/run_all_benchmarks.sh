@@ -9,9 +9,10 @@
 #   INPUT_FILE - path to input data file
 #
 # Optional overrides:
-#   MEMORY_LIMIT    - memory budget (default: 10GiB)
-#   THREAD_COUNTS   - space-separated thread counts (default: "4 8 16 24 32 40 44")
+#   MEMORY_LIMITS   - space-separated memory limits to sweep (default: "48GiB 32GiB 24GiB 16GiB 8GiB 4GiB 2GiB")
+#   THREADS         - fixed thread count (default: 16)
 #   BENCHMARK_RUNS  - runs per configuration (default: 3)
+#   MEMORY_LIMIT    - cgroup limit for data loading/server startup (default: first value from MEMORY_LIMITS)
 #   SSD_BASE        - SSD data directory (default: /mnt/nvme1/rotaki/es/datasets)
 #   HDD_BASE        - HDD data directory (default: /tank/local/riki/datasets)
 #   DATABASES       - which databases to benchmark (default: "duckdb postgres clickhouse")
@@ -30,12 +31,16 @@ PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # ── Configuration ─────────────────────────────────────────────────────────────
 INPUT_FILE="${INPUT_FILE:?INPUT_FILE must be set}"
 FORMAT="${FORMAT:-gensort}"
-MEMORY_LIMIT="${MEMORY_LIMIT:-10GiB}"
-THREAD_COUNTS="${THREAD_COUNTS:-4 8 16 24 32 40 44}"
+MEMORY_LIMITS="${MEMORY_LIMITS:-48GiB 32GiB 24GiB 16GiB 8GiB 4GiB 2GiB}"
+THREADS="${THREADS:-16}"
 BENCHMARK_RUNS="${BENCHMARK_RUNS:-3}"
 TABLE="${TABLE:-bench_data}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-7200}"
 CLEAR_CACHE_SCRIPT="/usr/local/sbin/clearcache3.sh"
+
+# For cgroup enforcement during data loading and server startup, use the maximum memory limit
+# Extract first (largest) value from MEMORY_LIMITS
+MEMORY_LIMIT="${MEMORY_LIMIT:-$(echo $MEMORY_LIMITS | awk '{print $1}')}"
 
 SSD_BASE="${SSD_BASE:-/mnt/nvme1/rotaki/es-duck/scripts}"
 HDD_BASE="${HDD_BASE:-/tank/local/riki/datasets}"
@@ -70,14 +75,14 @@ if [[ -z "${HOST_TAG_SAFE}" ]]; then
 fi
 
 echo "========================================================"
-echo "  Unified Benchmark Orchestrator"
+echo "  Unified Benchmark Orchestrator (Memory Sweep)"
 echo "========================================================"
 echo "Input:          $INPUT_FILE"
 echo "Format:         $FORMAT"
 echo "Dataset:        $DATASET_NAME_SAFE"
 echo "Host tag:       $HOST_TAG_SAFE"
-echo "Memory:         $MEMORY_LIMIT"
-echo "Thread counts:  $THREAD_COUNTS"
+echo "Memory limits:  $MEMORY_LIMITS"
+echo "Threads:        $THREADS"
 echo "Benchmark runs: $BENCHMARK_RUNS"
 echo "SSD base:       $SSD_BASE"
 echo "HDD base:       $HDD_BASE"
@@ -360,14 +365,15 @@ preflight_checks() {
     for db in $DATABASES; do
         case "$db" in
             duckdb)
-                require_file "${SCRIPT_DIR}/sweep_duckdb_parallelism.sh" "DuckDB sweep runner"
+                require_file "${SCRIPT_DIR}/sweep_duckdb_memory.sh" "DuckDB memory sweep runner"
                 ;;
             postgres)
                 require_command psql "PostgreSQL control and queries"
                 require_command pg_isready "PostgreSQL readiness checks"
+                require_file "${SCRIPT_DIR}/sweep_postgres_memory.sh" "PostgreSQL memory sweep runner"
                 ;;
             clickhouse)
-                require_file "${SCRIPT_DIR}/sweep_clickhouse_parallelism.sh" "ClickHouse sweep runner"
+                require_file "${SCRIPT_DIR}/sweep_clickhouse_memory.sh" "ClickHouse memory sweep runner"
                 ;;
             *)
                 add_preflight_missing "unknown database in DATABASES: '$db'"
@@ -884,9 +890,13 @@ upload_log_file() {
 clear_system_caches() {
     if [[ -f "$CLEAR_CACHE_SCRIPT" ]]; then
         echo "[cache] Clearing system caches..."
-        sudo "$CLEAR_CACHE_SCRIPT" || echo "Warning: Failed to clear caches"
+        if ! sudo "$CLEAR_CACHE_SCRIPT" 2>&1; then
+            echo "[cache] ERROR: Failed to clear caches (exit code: $?)" >&2
+            echo "[cache] This may impact benchmark results - caches may not be cold" >&2
+        fi
     else
         echo "[cache] Warning: Cache clear script not found: $CLEAR_CACHE_SCRIPT"
+        echo "[cache] Benchmarks will run without clearing system caches"
     fi
 }
 
@@ -898,7 +908,7 @@ run_duckdb_benchmark() {
 
     echo ""
     echo "========================================================"
-    echo "  DuckDB Parallelism Sweep"
+    echo "  DuckDB Memory Sweep"
     echo "========================================================"
 
     stop_other_dbs "duckdb"
@@ -908,23 +918,23 @@ run_duckdb_benchmark() {
     clear_system_caches
     echo "[duckdb] Running sweep..."
     cd "$PROJECT_DIR"
-    run_with_cgroup_limits "$MEMORY_LIMIT" "duckdb-sweep" \
-        env MEMORY_LIMIT="$MEMORY_LIMIT" \
-            THREAD_COUNTS="$THREAD_COUNTS" \
-            BENCHMARK_RUNS="$BENCHMARK_RUNS" \
-            DB_FILE="$duckdb_db_file" \
-            TEMP_DIR="$duckdb_temp_dir" \
-            TABLE="$TABLE" \
-            FORMAT="$FORMAT" \
-            INPUT_FILE="$INPUT_FILE" \
-            TIMEOUT_SECONDS="$TIMEOUT_SECONDS" \
-            RCLONE_REMOTE="$RCLONE_REMOTE" \
-            bash "${SCRIPT_DIR}/sweep_duckdb_parallelism.sh"
+    # For memory sweeps, we don't use cgroup limits - the sweep script handles memory settings
+    env MEMORY_LIMITS="$MEMORY_LIMITS" \
+        THREADS="$THREADS" \
+        BENCHMARK_RUNS="$BENCHMARK_RUNS" \
+        DB_FILE="$duckdb_db_file" \
+        TEMP_DIR="$duckdb_temp_dir" \
+        TABLE="$TABLE" \
+        FORMAT="$FORMAT" \
+        INPUT_FILE="$INPUT_FILE" \
+        TIMEOUT_SECONDS="$TIMEOUT_SECONDS" \
+        RCLONE_REMOTE="$RCLONE_REMOTE" \
+        bash "${SCRIPT_DIR}/sweep_duckdb_memory.sh"
 
     echo "[duckdb] Sweep complete."
     # Upload logs (find the most recent duckdb sweep log dir)
     local duckdb_log_dir
-    duckdb_log_dir=$(ls -dt ./logs/duckdb_parallelism_sweep_* 2>/dev/null | head -1)
+    duckdb_log_dir=$(ls -dt ./logs/duckdb_memory_sweep_* 2>/dev/null | head -1)
     if [[ -n "$duckdb_log_dir" ]]; then
         upload_logs "$duckdb_log_dir"
     fi
@@ -933,14 +943,14 @@ run_duckdb_benchmark() {
     move_data_to_hdd "duckdb"
 }
 
-# ── PostgreSQL Benchmark (with plan deduplication) ────────────────────────────
+# ── PostgreSQL Benchmark ──────────────────────────────────────────────────────
 run_postgres_benchmark() {
     local postgres_ssd_dir
     postgres_ssd_dir=$(dataset_db_path "$SSD_BASE" "postgres")
 
     echo ""
     echo "========================================================"
-    echo "  PostgreSQL Parallelism Sweep (with plan deduplication)"
+    echo "  PostgreSQL Memory Sweep"
     echo "========================================================"
 
     stop_other_dbs "postgres"
@@ -960,191 +970,31 @@ run_postgres_benchmark() {
         psql "$db_conn_base" -c "CREATE DATABASE bench" >/dev/null
     fi
 
-    local LOG_DIR="./logs/postgres_parallelism_sweep_${SWEEP_TIMESTAMP}"
-    mkdir -p "$LOG_DIR"
-
     clear_system_caches
-    echo "[postgres] Memory: $MEMORY_LIMIT"
-    echo "[postgres] Thread counts (total processes incl. leader): $THREAD_COUNTS"
-    echo "[postgres] Benchmark runs: $BENCHMARK_RUNS"
-    echo "[postgres] Log directory: $LOG_DIR"
-    echo ""
+    echo "[postgres] Running sweep..."
+    cd "$PROJECT_DIR"
 
-    local prev_plan=""
+    # Convert THREADS to PARALLEL_WORKERS (threads - 1 for leader)
+    local PARALLEL_WORKERS=$((THREADS - 1))
 
-    for T in $THREAD_COUNTS; do
-        local W
-        W=$(threads_to_postgres_workers "$T") || {
-            echo "ERROR: Invalid PostgreSQL thread count: $T"
-            continue
-        }
-        local TOTAL_PROCS=$((W + 1))
+    # For memory sweeps, we don't use cgroup limits - the sweep script handles memory settings
+    env MEMORY_LIMITS="$MEMORY_LIMITS" \
+        PARALLEL_WORKERS="$PARALLEL_WORKERS" \
+        BENCHMARK_RUNS="$BENCHMARK_RUNS" \
+        DB_CONNECTION="$db_conn" \
+        TABLE="$TABLE" \
+        FORMAT="$FORMAT" \
+        INPUT_FILE="$INPUT_FILE" \
+        TIMEOUT_SECONDS="$TIMEOUT_SECONDS" \
+        RCLONE_REMOTE="$RCLONE_REMOTE" \
+        bash "${SCRIPT_DIR}/sweep_postgres_memory.sh"
 
-        echo "========================================="
-        echo "[postgres] Checking plan for $T threads ($W workers + 1 leader)..."
-        echo "========================================="
-
-        # Get the query plan for this worker count
-        local current_plan
-        current_plan=$(get_postgres_plan "$W" "$db_conn" 2>&1) || {
-            echo "ERROR: Failed to get plan for $T threads ($W workers)"
-            echo "Output: $current_plan"
-            continue
-        }
-
-        # Compare with previous plan
-        if [[ -n "$prev_plan" ]] && [[ "$current_plan" = "$prev_plan" ]]; then
-            echo "[postgres] SKIPPING $T threads: plan identical to previous thread count."
-            echo "[postgres] Plan dedup saved ${BENCHMARK_RUNS} benchmark run(s)."
-            echo ""
-
-            # Log the skip
-            {
-                echo "========================================="
-                echo "PostgreSQL Parallelism Sweep - SKIPPED (identical plan)"
-                echo "========================================="
-                echo "Configuration: cgroup_memory=$MEMORY_LIMIT, threads=$T, parallel_workers=$W, total_processes=$TOTAL_PROCS"
-                echo "Reason: Plan identical to previous thread count"
-                echo "Time: $(date +"%Y-%m-%d %H:%M:%S")"
-                echo ""
-                echo "Plan:"
-                echo "$current_plan"
-            } > "${LOG_DIR}/${MEMORY_LIMIT}_${T}threads_${W}workers_SKIPPED.log"  # MEMORY_LIMIT = cgroup limit
-
-            upload_log_file "${LOG_DIR}/${MEMORY_LIMIT}_${T}threads_${W}workers_SKIPPED.log" "$LOG_DIR"
-
-            continue
-        fi
-
-        prev_plan="$current_plan"
-        echo "[postgres] Plan differs from previous. Running $BENCHMARK_RUNS benchmark run(s)..."
-        echo ""
-        echo "Plan preview:"
-        echo "$current_plan" | head -20
-        echo ""
-
-        # Run benchmarks for this thread count (adapted from sweep_postgres_parallelism.sh)
-        for RUN in $(seq 1 "$BENCHMARK_RUNS"); do
-            RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-            LOG_FILE="${LOG_DIR}/${MEMORY_LIMIT}_${T}threads_${W}workers_run${RUN}_${RUN_TIMESTAMP}.log"  # MEMORY_LIMIT = cgroup limit
-            TEMP_OUTPUT="/tmp/postgres_sweep_${T}threads_${W}workers_run${RUN}_${RUN_TIMESTAMP}.log"
-
-            echo "========================================="
-            echo "Running with $T threads ($W workers + 1 leader)... (Run $RUN of $BENCHMARK_RUNS)"
-            echo "Start time: $(date +"%Y-%m-%d %H:%M:%S")"
-            echo "========================================="
-            echo "Log file: $LOG_FILE"
-            echo ""
-
-            set +e
-            cd "$PROJECT_DIR"
-            run_with_cgroup_limits "$MEMORY_LIMIT" "postgres-sort-client" \
-                timeout "$TIMEOUT_SECONDS" cargo run --release --bin sort-postgres --features db-postgres -- \
-                    --db "$db_conn" \
-                    --table "$TABLE" \
-                    --total-memory "$MEMORY_LIMIT" \
-                    --parallel-workers "$W" 2>&1 | tee "$TEMP_OUTPUT"
-
-            EXIT_CODE=${PIPESTATUS[0]}
-            set -e
-
-            COMMAND_OUTPUT=$(cat "$TEMP_OUTPUT")
-
-            local SKIP_REMAINING=false
-            if [[ $EXIT_CODE -eq 124 ]]; then
-                echo ""
-                echo "WARNING: Process timed out after ${TIMEOUT_SECONDS}s"
-                echo "Skipping remaining benchmark runs for $T threads..."
-                SKIP_REMAINING=true
-            elif [[ $EXIT_CODE -eq 137 ]]; then
-                echo ""
-                echo "WARNING: Process killed by memory manager (OOM kill, exit 137)"
-                echo "Skipping remaining benchmark runs for $T threads..."
-                SKIP_REMAINING=true
-            fi
-
-            # Clear PostgreSQL caches
-            psql "$db_conn" -c "DISCARD ALL" >/dev/null 2>&1 || true
-
-            # Extract timing (grep returns non-zero if no match; suppress to avoid aborting
-            # the orchestrator on OOM kill or any run that exits without printing TIMING:)
-            DURATION=$(echo "$COMMAND_OUTPUT" | grep "TIMING:" | awk '{print $2}' || true)
-
-            # Write log
-            {
-                echo "========================================="
-                echo "PostgreSQL Parallelism Sweep - Configuration Log"
-                echo "========================================="
-                echo "Configuration: cgroup_memory=$MEMORY_LIMIT, threads=$T, parallel_workers=$W, total_processes=$TOTAL_PROCS, run=$RUN/$BENCHMARK_RUNS"
-                echo "Database: $db_conn"
-                echo "Table: $TABLE"
-                echo "Timeout: ${TIMEOUT_SECONDS}s"
-                echo "Start time: $(date +"%Y-%m-%d %H:%M:%S")"
-                echo ""
-                echo "Exit code: $EXIT_CODE"
-                if [[ $EXIT_CODE -eq 0 ]]; then
-                    echo "Status: SUCCESS"
-                elif [[ $EXIT_CODE -eq 124 ]]; then
-                    echo "Status: TIMEOUT"
-                elif [[ $EXIT_CODE -eq 137 ]]; then
-                    echo "Status: OOM_KILLED"
-                else
-                    echo "Status: FAILED"
-                fi
-                echo ""
-                echo "========================================="
-                echo "Full output:"
-                echo "========================================="
-                echo "$COMMAND_OUTPUT"
-                echo ""
-                echo "========================================="
-                echo "Summary:"
-                echo "========================================="
-                if [[ -n "$DURATION" ]]; then
-                    echo "Duration: ${DURATION}s"
-                    echo "Result: $MEMORY_LIMIT,$W,$RUN,$DURATION"  # MEMORY_LIMIT = cgroup limit
-                else
-                    echo "WARNING: Could not extract timing information"
-                fi
-                echo "End time: $(date +"%Y-%m-%d %H:%M:%S")"
-                echo "========================================="
-            } > "$LOG_FILE"
-
-            upload_log_file "$LOG_FILE" "$LOG_DIR"
-
-            rm -f "$TEMP_OUTPUT"
-
-            echo ""
-            echo "========================================="
-            if [[ -n "$DURATION" ]]; then
-                echo "Result logged: cgroup_memory=$MEMORY_LIMIT, threads=$T, parallel_workers=$W, run=$RUN/$BENCHMARK_RUNS, duration=${DURATION}s"
-            else
-                echo "Warning: Could not extract timing information"
-            fi
-            echo "End time: $(date +"%Y-%m-%d %H:%M:%S")"
-            echo "========================================="
-
-            clear_system_caches
-
-            if [[ "$SKIP_REMAINING" = true ]]; then
-                echo "Moving to next configuration..."
-                break
-            fi
-
-            echo ""
-            echo "Waiting 30 seconds before next run..."
-            sync
-            sleep 30
-            echo ""
-        done
-    done
-
-    echo ""
-    echo "=== PostgreSQL Sweep Complete ==="
-    echo "Results saved to: $LOG_DIR"
-    grep "Result:" "$LOG_DIR"/*.log 2>/dev/null || echo "No successful results found"
-
-    upload_logs "$LOG_DIR"
+    # Upload logs (find the most recent postgres sweep log dir)
+    local postgres_log_dir
+    postgres_log_dir=$(ls -dt ./logs/postgres_memory_sweep_* 2>/dev/null | head -1)
+    if [[ -n "$postgres_log_dir" ]]; then
+        upload_logs "$postgres_log_dir"
+    fi
 
     # Stop postgres and move data
     stop_postgres
@@ -1158,7 +1008,7 @@ run_clickhouse_benchmark() {
 
     echo ""
     echo "========================================================"
-    echo "  ClickHouse Parallelism Sweep"
+    echo "  ClickHouse Memory Sweep"
     echo "========================================================"
 
     stop_other_dbs "clickhouse"
@@ -1171,21 +1021,22 @@ run_clickhouse_benchmark() {
     clear_system_caches
     echo "[clickhouse] Running sweep..."
     cd "$PROJECT_DIR"
-    run_with_cgroup_limits "$MEMORY_LIMIT" "clickhouse-sweep-client" \
-        env TOTAL_MEMORY="$MEMORY_LIMIT" \
-            THREAD_COUNTS="$THREAD_COUNTS" \
-            BENCHMARK_RUNS="$BENCHMARK_RUNS" \
-            CLICKHOUSE_URL="http://localhost:${HTTP_PORT}" \
-            TABLE="$TABLE" \
-            FORMAT="$FORMAT" \
-            INPUT_FILE="$INPUT_FILE" \
-            TIMEOUT_SECONDS="$TIMEOUT_SECONDS" \
-            RCLONE_REMOTE="$RCLONE_REMOTE" \
-            bash "${SCRIPT_DIR}/sweep_clickhouse_parallelism.sh"
+    # For memory sweeps, we don't use cgroup limits - the sweep script handles memory settings
+    env MEMORY_LIMITS="$MEMORY_LIMITS" \
+        THREADS="$THREADS" \
+        BENCHMARK_RUNS="$BENCHMARK_RUNS" \
+        CLICKHOUSE_URL="http://localhost:${HTTP_PORT}" \
+        DATABASE="default" \
+        TABLE="$TABLE" \
+        FORMAT="$FORMAT" \
+        INPUT_FILE="$INPUT_FILE" \
+        TIMEOUT_SECONDS="$TIMEOUT_SECONDS" \
+        RCLONE_REMOTE="$RCLONE_REMOTE" \
+        bash "${SCRIPT_DIR}/sweep_clickhouse_memory.sh"
 
     # Upload logs (find the most recent clickhouse sweep log dir)
     local clickhouse_log_dir
-    clickhouse_log_dir=$(ls -dt ./logs/clickhouse_parallelism_sweep_* 2>/dev/null | head -1)
+    clickhouse_log_dir=$(ls -dt ./logs/clickhouse_memory_sweep_* 2>/dev/null | head -1)
     if [[ -n "$clickhouse_log_dir" ]]; then
         upload_logs "$clickhouse_log_dir"
     fi

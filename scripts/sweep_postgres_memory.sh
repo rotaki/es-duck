@@ -12,15 +12,38 @@ INPUT_FILE="${INPUT_FILE:-testdata/test_gensort_5gb.dat}"
 FORMAT="${FORMAT:-gensort}"
 DB_CONNECTION="${DB_CONNECTION:-postgres://postgres@localhost:5433/bench}"
 TABLE="${TABLE:-bench_data}"
-PARALLEL_WORKERS="${PARALLEL_WORKERS:-40}"
-# MEMORY_LIMITS="${MEMORY_LIMITS:-1GB 4GB 6GB 8GB 16GB 24GB 32GB}"
-MEMORY_LIMITS="${MEMORY_LIMITS:-2GB}"
+PARALLEL_WORKERS="${PARALLEL_WORKERS:-15}"  # Default: 16 threads - 1 leader = 15 workers
+# MEMORY_LIMITS="${MEMORY_LIMITS:-2GiB 4GiB 6GiB 8GiB 16GiB 24GiB 32GiB 48GiB}"
+MEMORY_LIMITS="${MEMORY_LIMITS:-48GiB 32GiB 24GiB 16GiB 8GiB 4GiB 2GiB}"
 LOG_DIR="${LOG_DIR:-./logs/postgres_memory_sweep_${SWEEP_TIMESTAMP}}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-7200}"  # 2 hour default timeout
 BENCHMARK_RUNS="${BENCHMARK_RUNS:-1}"  # Number of times to run each configuration
 CLEAR_CACHE_SCRIPT="/usr/local/sbin/clearcache3.sh"
 TEMP_TABLESPACE="${TEMP_TABLESPACE:-}"  # Optional temp tablespace for spilling
 OUTPUT="${OUTPUT:-}"  # Optional output path for binary mode
+RCLONE_REMOTE="${RCLONE_REMOTE:-}"
+
+upload_log_file() {
+    local log_file="$1"
+
+    if [ -z "$RCLONE_REMOTE" ]; then
+        return 0
+    fi
+    if ! command -v rclone >/dev/null 2>&1; then
+        echo "[upload] rclone not found, skipping per-run upload."
+        return 0
+    fi
+
+    local remote_dir="${RCLONE_REMOTE}/$(basename "$LOG_DIR")"
+    local remote_file="${remote_dir}/$(basename "$log_file")"
+
+    echo "[upload] Uploading log file $log_file -> $remote_file ..."
+    if rclone copyto "$log_file" "$remote_file" --progress; then
+        echo "[upload] Upload complete: $remote_file"
+    else
+        echo "[upload] Warning: per-run upload failed (exit $?)" >&2
+    fi
+}
 
 echo "=== PostgreSQL Memory Sweep ==="
 echo "Input: $INPUT_FILE"
@@ -78,7 +101,14 @@ if [ "$TABLE_EXISTS" = "f" ]; then
 fi
 
 # Run sort for each memory limit
+SKIP_ALL_REMAINING=false
 for MEM in $MEMORY_LIMITS; do
+  # Skip remaining memory limits if previous configuration failed
+  if [ "$SKIP_ALL_REMAINING" = true ]; then
+    echo "Skipping $MEM - previous memory limit failed"
+    continue
+  fi
+
   for RUN in $(seq 1 $BENCHMARK_RUNS); do
     RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
     # Create individual log file for this configuration with run number suffix
@@ -143,12 +173,27 @@ for MEM in $MEMORY_LIMITS; do
     # Read captured output
     COMMAND_OUTPUT=$(cat "$TEMP_OUTPUT")
 
-    # Check timeout - skip remaining runs for this configuration
+    # Check timeout or OOM kill - skip remaining runs for this configuration
+    # Also check for memory errors in output (PostgreSQL connection closed, out of memory, etc)
     if [ $EXIT_CODE -eq 124 ]; then
         echo ""
         echo "WARNING: Process timed out after ${TIMEOUT_SECONDS}s"
         echo "Skipping remaining benchmark runs for $MEM work_mem..."
         SKIP_REMAINING=true
+    elif [ $EXIT_CODE -eq 137 ]; then
+        echo ""
+        echo "WARNING: Process killed by memory manager (OOM kill, exit 137)"
+        echo "Skipping remaining benchmark runs for $MEM work_mem..."
+        SKIP_REMAINING=true
+    elif echo "$COMMAND_OUTPUT" | grep -qiE "(out of memory|memory limit|FATAL.*memory|could not allocate|Error.*Closed)"; then
+        echo ""
+        echo "WARNING: Process encountered memory error (detected in output)"
+        echo "Skipping remaining benchmark runs for $MEM work_mem..."
+        SKIP_REMAINING=true
+        # Treat as OOM for logging purposes
+        if [ $EXIT_CODE -eq 0 ]; then
+            EXIT_CODE=137
+        fi
     else
         SKIP_REMAINING=false
     fi
@@ -177,6 +222,8 @@ for MEM in $MEMORY_LIMITS; do
             echo "Status: SUCCESS"
         elif [ $EXIT_CODE -eq 124 ]; then
             echo "Status: TIMEOUT"
+        elif [ $EXIT_CODE -eq 137 ]; then
+            echo "Status: OOM_KILLED"
         else
             echo "Status: FAILED"
         fi
@@ -198,6 +245,8 @@ for MEM in $MEMORY_LIMITS; do
         echo "End time: $(date +"%Y-%m-%d %H:%M:%S")"
         echo "========================================="
     } > "$LOG_FILE"
+
+    upload_log_file "$LOG_FILE"
 
     # Clean up temp output file
     rm -f "$TEMP_OUTPUT"
@@ -226,16 +275,20 @@ for MEM in $MEMORY_LIMITS; do
     fi
 
     # Clear system caches
-    if [ -x "$CLEAR_CACHE_SCRIPT" ]; then
+    if [ -f "$CLEAR_CACHE_SCRIPT" ]; then
         echo "Clearing system caches..."
-        sudo "$CLEAR_CACHE_SCRIPT" || echo "Warning: Failed to clear caches"
+        if ! sudo "$CLEAR_CACHE_SCRIPT" 2>&1; then
+            echo "ERROR: Failed to clear caches (exit code: $?)" >&2
+            echo "This may impact benchmark accuracy" >&2
+        fi
     else
-        echo "Warning: Cache clear script not found or not executable: $CLEAR_CACHE_SCRIPT"
+        echo "Warning: Cache clear script not found: $CLEAR_CACHE_SCRIPT"
     fi
 
     # Skip remaining benchmark runs for this configuration if timeout occurred
     if [ "$SKIP_REMAINING" = true ]; then
-        echo "Moving to next configuration..."
+        SKIP_ALL_REMAINING=true
+        echo "Configuration failed - skipping all remaining lower memory limits..."
         break
     fi
 
