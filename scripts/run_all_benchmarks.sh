@@ -783,24 +783,38 @@ prepare_data_on_ssd() {
     esac
 }
 
-# Delete data from SSD after benchmarking (canonical copy remains on HDD).
+# Move data from SSD back to HDD after benchmarking.
 # Usage: move_data_to_hdd <db_type>
 move_data_to_hdd() {
     local db_type="$1"
-    local ssd_path
+    local ssd_path hdd_path
 
     ssd_path=$(dataset_db_path "$SSD_BASE" "$db_type")
+    hdd_path=$(dataset_db_path "$HDD_BASE" "$db_type")
 
     if [[ ! -e "$ssd_path" ]]; then
-        echo "[data] No data on SSD to remove for $db_type."
+        echo "[data] No data on SSD to move for $db_type."
         return 0
     fi
 
-    echo "[data] Removing $db_type data from SSD (HDD copy retained)..."
+    # If data doesn't exist on HDD, copy it there first
+    if [[ ! -e "$hdd_path" ]]; then
+        echo "[data] Copying $db_type data from SSD to HDD (preserving for future runs)..."
+        echo "[data]   From: $ssd_path"
+        echo "[data]   To:   $hdd_path"
+        mkdir -p "$(dirname "$hdd_path")"
+        cp -r "$ssd_path" "$hdd_path"
+        sync
+        echo "[data] Copy to HDD complete."
+    else
+        echo "[data] $db_type data already exists on HDD."
+    fi
+
+    echo "[data] Removing $db_type data from SSD..."
     echo "[data]   Deleting: $ssd_path"
     rm -rf "$ssd_path"
     sync
-    echo "[data] Removal complete."
+    echo "[data] SSD cleanup complete."
 }
 
 # Get PostgreSQL query plan for a given parallel worker count (without executing).
