@@ -23,8 +23,29 @@ TEMP_TABLESPACE="${TEMP_TABLESPACE:-}"  # Optional temp tablespace for spilling
 OUTPUT="${OUTPUT:-}"  # Optional output path for binary mode
 RCLONE_REMOTE="${RCLONE_REMOTE:-}"
 CGROUP_MODE="${CGROUP_MODE:-on}"  # on | off
+POSTGRES_MEMORY_FRACTION="${POSTGRES_MEMORY_FRACTION:-0.6}"  # Fraction of cgroup limit for PostgreSQL total memory (default: 60%)
 
 # ── Helper Functions ──────────────────────────────────────────────────────────
+
+calculate_postgres_memory_limit() {
+    local cgroup_limit="$1"
+    local limit_bytes
+
+    if ! limit_bytes=$(parse_memory_to_bytes "$cgroup_limit"); then
+        echo "ERROR: Cannot parse memory limit '$cgroup_limit'" >&2
+        return 1
+    fi
+
+    # Calculate fraction of the limit for PostgreSQL total memory
+    local postgres_bytes
+    postgres_bytes=$(awk -v total="$limit_bytes" -v frac="$POSTGRES_MEMORY_FRACTION" 'BEGIN { printf "%.0f\n", total * frac }')
+
+    # Convert back to human-readable format (GiB)
+    local postgres_gib
+    postgres_gib=$(awk -v bytes="$postgres_bytes" 'BEGIN { printf "%.1fGiB\n", bytes / 1024 / 1024 / 1024 }')
+
+    echo "$postgres_gib"
+}
 
 parse_memory_to_bytes() {
     local raw="${1//[[:space:]]/}"
@@ -205,7 +226,12 @@ for MEM in $MEMORY_LIMITS; do
     echo ""
 
     # Run with timeout and show output in real-time using tee
-    # Note: When CGROUP_MODE=on, applies OS-level memory limits to the client process
+    # Calculate PostgreSQL total memory as a fraction of the cgroup limit
+    # This will be divided by (workers + 1 leader) to get work_mem per process
+    POSTGRES_MEM=$(calculate_postgres_memory_limit "$MEM")
+    echo "[postgres] Setting PostgreSQL total memory to $POSTGRES_MEM (${POSTGRES_MEMORY_FRACTION} of cgroup limit $MEM)"
+    echo "[postgres] This will be divided among $((PARALLEL_WORKERS + 1)) processes (${PARALLEL_WORKERS} workers + 1 leader)"
+
     set +e
     if [ -n "$OUTPUT" ]; then
         # Binary output mode: truncate output file first in case it exists
@@ -220,7 +246,7 @@ for MEM in $MEMORY_LIMITS; do
                 timeout $TIMEOUT_SECONDS cargo run --release --bin sort-postgres --features db-postgres -- \
                     --db "$DB_CONNECTION" \
                     --table "$TABLE" \
-                    --total-memory "$MEM" \
+                    --total-memory "$POSTGRES_MEM" \
                     --parallel-workers "$PARALLEL_WORKERS" \
                     --temp-tablespace "$TEMP_TABLESPACE" \
                     --output "$OUTPUT" 2>&1 | tee "$TEMP_OUTPUT"
@@ -229,7 +255,7 @@ for MEM in $MEMORY_LIMITS; do
                 timeout $TIMEOUT_SECONDS cargo run --release --bin sort-postgres --features db-postgres -- \
                     --db "$DB_CONNECTION" \
                     --table "$TABLE" \
-                    --total-memory "$MEM" \
+                    --total-memory "$POSTGRES_MEM" \
                     --parallel-workers "$PARALLEL_WORKERS" \
                     --output "$OUTPUT" 2>&1 | tee "$TEMP_OUTPUT"
         fi
@@ -240,7 +266,7 @@ for MEM in $MEMORY_LIMITS; do
                 timeout $TIMEOUT_SECONDS cargo run --release --bin sort-postgres --features db-postgres -- \
                     --db "$DB_CONNECTION" \
                     --table "$TABLE" \
-                    --total-memory "$MEM" \
+                    --total-memory "$POSTGRES_MEM" \
                     --parallel-workers "$PARALLEL_WORKERS" \
                     --temp-tablespace "$TEMP_TABLESPACE" 2>&1 | tee "$TEMP_OUTPUT"
         else
@@ -248,7 +274,7 @@ for MEM in $MEMORY_LIMITS; do
                 timeout $TIMEOUT_SECONDS cargo run --release --bin sort-postgres --features db-postgres -- \
                     --db "$DB_CONNECTION" \
                     --table "$TABLE" \
-                    --total-memory "$MEM" \
+                    --total-memory "$POSTGRES_MEM" \
                     --parallel-workers "$PARALLEL_WORKERS" 2>&1 | tee "$TEMP_OUTPUT"
         fi
     fi

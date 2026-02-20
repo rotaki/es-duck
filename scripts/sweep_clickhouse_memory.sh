@@ -23,8 +23,29 @@ CLEAR_CACHE_SCRIPT="/usr/local/sbin/clearcache3.sh"
 OUTPUT="${OUTPUT:-}"  # Optional output path for binary mode
 RCLONE_REMOTE="${RCLONE_REMOTE:-}"
 CGROUP_MODE="${CGROUP_MODE:-on}"  # on | off
+CLICKHOUSE_MEMORY_FRACTION="${CLICKHOUSE_MEMORY_FRACTION:-0.6}"  # Fraction of cgroup limit for ClickHouse soft limit (default: 60%)
 
 # ── Helper Functions ──────────────────────────────────────────────────────────
+
+calculate_clickhouse_memory_limit() {
+    local cgroup_limit="$1"
+    local limit_bytes
+
+    if ! limit_bytes=$(parse_memory_to_bytes "$cgroup_limit"); then
+        echo "ERROR: Cannot parse memory limit '$cgroup_limit'" >&2
+        return 1
+    fi
+
+    # Calculate fraction of the limit for ClickHouse soft limit
+    local clickhouse_bytes
+    clickhouse_bytes=$(awk -v total="$limit_bytes" -v frac="$CLICKHOUSE_MEMORY_FRACTION" 'BEGIN { printf "%.0f\n", total * frac }')
+
+    # Convert back to human-readable format (GiB)
+    local clickhouse_gib
+    clickhouse_gib=$(awk -v bytes="$clickhouse_bytes" 'BEGIN { printf "%.1fGiB\n", bytes / 1024 / 1024 / 1024 }')
+
+    echo "$clickhouse_gib"
+}
 
 parse_memory_to_bytes() {
     local raw="${1//[[:space:]]/}"
@@ -195,7 +216,10 @@ for MEM in $MEMORY_LIMITS; do
     echo ""
 
     # Run with timeout and show output in real-time using tee
-    # Note: When CGROUP_MODE=on, applies OS-level memory limits to the client process
+    # Calculate ClickHouse memory limit as a fraction of the cgroup limit
+    CLICKHOUSE_MEM=$(calculate_clickhouse_memory_limit "$MEM")
+    echo "[clickhouse] Setting ClickHouse memory_limit to $CLICKHOUSE_MEM (${CLICKHOUSE_MEMORY_FRACTION} of cgroup limit $MEM)"
+
     set +e
     if [ -n "$OUTPUT" ]; then
         # Binary output mode: truncate output file first in case it exists
@@ -211,7 +235,7 @@ for MEM in $MEMORY_LIMITS; do
                 --database "$DATABASE" \
                 --table "$TABLE" \
                 --threads "$THREADS" \
-                --memory-limit "$MEM" \
+                --memory-limit "$CLICKHOUSE_MEM" \
                 --output "$OUTPUT" 2>&1 | tee "$TEMP_OUTPUT"
     else
         # Count mode
@@ -221,7 +245,7 @@ for MEM in $MEMORY_LIMITS; do
                 --database "$DATABASE" \
                 --table "$TABLE" \
                 --threads "$THREADS" \
-                --memory-limit "$MEM" 2>&1 | tee "$TEMP_OUTPUT"
+                --memory-limit "$CLICKHOUSE_MEM" 2>&1 | tee "$TEMP_OUTPUT"
     fi
 
     EXIT_CODE=${PIPESTATUS[0]}

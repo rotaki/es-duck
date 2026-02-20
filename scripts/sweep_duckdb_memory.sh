@@ -23,6 +23,7 @@ CLEAR_CACHE_SCRIPT="/usr/local/sbin/clearcache3.sh"
 OUTPUT="${OUTPUT:-}"  # Optional output path for parquet mode
 RCLONE_REMOTE="${RCLONE_REMOTE:-}"
 CGROUP_MODE="${CGROUP_MODE:-on}"  # on | off
+DUCKDB_MEMORY_FRACTION="${DUCKDB_MEMORY_FRACTION:-0.6}"  # Fraction of cgroup limit for DuckDB soft limit (default: 60%)
 
 # ── Helper Functions ──────────────────────────────────────────────────────────
 
@@ -47,6 +48,26 @@ parse_memory_to_bytes() {
     else
         return 1
     fi
+}
+
+calculate_duckdb_memory_limit() {
+    local cgroup_limit="$1"
+    local limit_bytes
+
+    if ! limit_bytes=$(parse_memory_to_bytes "$cgroup_limit"); then
+        echo "ERROR: Cannot parse memory limit '$cgroup_limit'" >&2
+        return 1
+    fi
+
+    # Calculate fraction of the limit for DuckDB soft limit
+    local duckdb_bytes
+    duckdb_bytes=$(awk -v total="$limit_bytes" -v frac="$DUCKDB_MEMORY_FRACTION" 'BEGIN { printf "%.0f\n", total * frac }')
+
+    # Convert back to human-readable format (GiB)
+    local duckdb_gib
+    duckdb_gib=$(awk -v bytes="$duckdb_bytes" 'BEGIN { printf "%.1fGiB\n", bytes / 1024 / 1024 / 1024 }')
+
+    echo "$duckdb_gib"
 }
 
 run_with_cgroup_limits() {
@@ -197,7 +218,10 @@ for MEM in $MEMORY_LIMITS; do
     echo ""
 
     # Run with timeout and show output in real-time using tee
-    # Note: When CGROUP_MODE=on, DuckDB will auto-detect memory from cgroup and use 80% of it
+    # Calculate DuckDB memory limit as a fraction of the cgroup limit
+    DUCKDB_MEM=$(calculate_duckdb_memory_limit "$MEM")
+    echo "[duckdb] Setting DuckDB memory_limit to $DUCKDB_MEM (${DUCKDB_MEMORY_FRACTION} of cgroup limit $MEM)"
+
     set +e
     if [ -n "$OUTPUT" ]; then
         # Parquet mode: truncate output file first in case it's open
@@ -213,6 +237,7 @@ for MEM in $MEMORY_LIMITS; do
                 --table "$TABLE" \
                 --temp-dir "$TEMP_DIR" \
                 --threads "$THREADS" \
+                --memory-limit "$DUCKDB_MEM" \
                 --output "$OUTPUT" 2>&1 | tee "$TEMP_OUTPUT"
     else
         # Count mode
@@ -221,7 +246,8 @@ for MEM in $MEMORY_LIMITS; do
                 --db "$DB_FILE" \
                 --table "$TABLE" \
                 --temp-dir "$TEMP_DIR" \
-                --threads "$THREADS" 2>&1 | tee "$TEMP_OUTPUT"
+                --threads "$THREADS" \
+                --memory-limit "$DUCKDB_MEM" 2>&1 | tee "$TEMP_OUTPUT"
     fi
 
     EXIT_CODE=${PIPESTATUS[0]}
