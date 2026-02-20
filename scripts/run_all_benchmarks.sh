@@ -730,13 +730,12 @@ prepare_data_on_ssd() {
         duckdb)
             echo "[data] Loading data into DuckDB at $ssd_path..."
             cd "$PROJECT_DIR"
-            run_with_cgroup_limits "$MEMORY_LIMIT" "duckdb-load" \
-                cargo run --release --bin load-duckdb --features db-duckdb -- \
-                    --format "$FORMAT" \
-                    --input "$INPUT_FILE" \
-                    --db "$ssd_path" \
-                    --table "$TABLE" \
-                    --threads 14
+            cargo run --release --bin load-duckdb --features db-duckdb -- \
+                --format "$FORMAT" \
+                --input "$INPUT_FILE" \
+                --db "$ssd_path" \
+                --table "$TABLE" \
+                --threads 14
             sync
             echo "[data] DuckDB data created."
             ;;
@@ -753,13 +752,12 @@ prepare_data_on_ssd() {
             fi
             echo "[data] Loading data into PostgreSQL..."
             cd "$PROJECT_DIR"
-            run_with_cgroup_limits "$MEMORY_LIMIT" "postgres-load-client" \
-                cargo run --release --bin load-postgres --features db-postgres -- \
-                    --format "$FORMAT" \
-                    --input "$INPUT_FILE" \
-                    --db "$db_conn" \
-                    --table "$TABLE" \
-                    --threads 14
+            cargo run --release --bin load-postgres --features db-postgres -- \
+                --format "$FORMAT" \
+                --input "$INPUT_FILE" \
+                --db "$db_conn" \
+                --table "$TABLE" \
+                --threads 14
             psql "$db_conn" -c "CHECKPOINT" >/dev/null
             sync
             echo "[data] PostgreSQL data created."
@@ -769,14 +767,13 @@ prepare_data_on_ssd() {
             start_clickhouse "$ssd_path"
             echo "[data] Loading data into ClickHouse..."
             cd "$PROJECT_DIR"
-            run_with_cgroup_limits "$MEMORY_LIMIT" "clickhouse-load-client" \
-                cargo run --release --bin load-clickhouse --features db-clickhouse -- \
-                    --format "$FORMAT" \
-                    --input "$INPUT_FILE" \
-                    --url "http://localhost:${HTTP_PORT}" \
-                    --database default \
-                    --table "$TABLE" \
-                    --threads 14
+            cargo run --release --bin load-clickhouse --features db-clickhouse -- \
+                --format "$FORMAT" \
+                --input "$INPUT_FILE" \
+                --url "http://localhost:${HTTP_PORT}" \
+                --database default \
+                --table "$TABLE" \
+                --threads 14
             sync
             echo "[data] ClickHouse data created."
             ;;
@@ -932,7 +929,7 @@ run_duckdb_benchmark() {
     clear_system_caches
     echo "[duckdb] Running sweep..."
     cd "$PROJECT_DIR"
-    # For memory sweeps, we don't use cgroup limits - the sweep script handles memory settings
+    # Memory sweeps use cgroup limits via the sweep script (controlled by CGROUP_MODE)
     env MEMORY_LIMITS="$MEMORY_LIMITS" \
         THREADS="$THREADS" \
         BENCHMARK_RUNS="$BENCHMARK_RUNS" \
@@ -943,6 +940,7 @@ run_duckdb_benchmark() {
         INPUT_FILE="$INPUT_FILE" \
         TIMEOUT_SECONDS="$TIMEOUT_SECONDS" \
         RCLONE_REMOTE="$RCLONE_REMOTE" \
+        CGROUP_MODE="$CGROUP_MODE" \
         bash "${SCRIPT_DIR}/sweep_duckdb_memory.sh"
 
     echo "[duckdb] Sweep complete."
@@ -991,7 +989,7 @@ run_postgres_benchmark() {
     # Convert THREADS to PARALLEL_WORKERS (threads - 1 for leader)
     local PARALLEL_WORKERS=$((THREADS - 1))
 
-    # For memory sweeps, we don't use cgroup limits - the sweep script handles memory settings
+    # Memory sweeps use cgroup limits via the sweep script (controlled by CGROUP_MODE)
     env MEMORY_LIMITS="$MEMORY_LIMITS" \
         PARALLEL_WORKERS="$PARALLEL_WORKERS" \
         BENCHMARK_RUNS="$BENCHMARK_RUNS" \
@@ -1001,6 +999,7 @@ run_postgres_benchmark() {
         INPUT_FILE="$INPUT_FILE" \
         TIMEOUT_SECONDS="$TIMEOUT_SECONDS" \
         RCLONE_REMOTE="$RCLONE_REMOTE" \
+        CGROUP_MODE="$CGROUP_MODE" \
         bash "${SCRIPT_DIR}/sweep_postgres_memory.sh"
 
     # Upload logs (find the most recent postgres sweep log dir)
@@ -1035,7 +1034,7 @@ run_clickhouse_benchmark() {
     clear_system_caches
     echo "[clickhouse] Running sweep..."
     cd "$PROJECT_DIR"
-    # For memory sweeps, we don't use cgroup limits - the sweep script handles memory settings
+    # Memory sweeps use cgroup limits via the sweep script (controlled by CGROUP_MODE)
     env MEMORY_LIMITS="$MEMORY_LIMITS" \
         THREADS="$THREADS" \
         BENCHMARK_RUNS="$BENCHMARK_RUNS" \
@@ -1046,6 +1045,7 @@ run_clickhouse_benchmark() {
         INPUT_FILE="$INPUT_FILE" \
         TIMEOUT_SECONDS="$TIMEOUT_SECONDS" \
         RCLONE_REMOTE="$RCLONE_REMOTE" \
+        CGROUP_MODE="$CGROUP_MODE" \
         bash "${SCRIPT_DIR}/sweep_clickhouse_memory.sh"
 
     # Upload logs (find the most recent clickhouse sweep log dir)

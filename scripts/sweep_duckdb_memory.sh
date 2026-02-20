@@ -22,6 +22,86 @@ BENCHMARK_RUNS="${BENCHMARK_RUNS:-1}"  # Number of times to run each configurati
 CLEAR_CACHE_SCRIPT="/usr/local/sbin/clearcache3.sh"
 OUTPUT="${OUTPUT:-}"  # Optional output path for parquet mode
 RCLONE_REMOTE="${RCLONE_REMOTE:-}"
+CGROUP_MODE="${CGROUP_MODE:-on}"  # on | off
+
+# ── Helper Functions ──────────────────────────────────────────────────────────
+
+parse_memory_to_bytes() {
+    local raw="${1//[[:space:]]/}"
+    local mem="${raw^^}"
+    local value
+
+    # Accepts GiB/MiB/KiB (binary units), or shorthand G/M/K.
+    if [[ "$mem" =~ ^([0-9]+([.][0-9]+)?)(GIB|G)$ ]]; then
+        value="${BASH_REMATCH[1]}"
+        awk -v v="$value" 'BEGIN { printf "%.0f\n", v * 1024 * 1024 * 1024 }'
+    elif [[ "$mem" =~ ^([0-9]+([.][0-9]+)?)(MIB|M)$ ]]; then
+        value="${BASH_REMATCH[1]}"
+        awk -v v="$value" 'BEGIN { printf "%.0f\n", v * 1024 * 1024 }'
+    elif [[ "$mem" =~ ^([0-9]+([.][0-9]+)?)(KIB|K)$ ]]; then
+        value="${BASH_REMATCH[1]}"
+        awk -v v="$value" 'BEGIN { printf "%.0f\n", v * 1024 }'
+    elif [[ "$mem" =~ ^([0-9]+([.][0-9]+)?)B?$ ]]; then
+        value="${BASH_REMATCH[1]}"
+        awk -v v="$value" 'BEGIN { printf "%.0f\n", v }'
+    else
+        return 1
+    fi
+}
+
+run_with_cgroup_limits() {
+    local memory_limit="$1"
+    shift
+
+    if [[ "$CGROUP_MODE" == "off" ]]; then
+        "$@"
+        return $?
+    fi
+
+    if [[ "$CGROUP_MODE" != "on" ]]; then
+        echo "[cgroup] ERROR: invalid CGROUP_MODE='$CGROUP_MODE' (expected on|off)." >&2
+        return 1
+    fi
+
+    local limit_bytes
+    if ! limit_bytes=$(parse_memory_to_bytes "$memory_limit"); then
+        echo "[cgroup] ERROR: cannot parse memory limit '$memory_limit'." >&2
+        return 1
+    fi
+
+    if [[ "$(uname -s)" != "Linux" ]]; then
+        echo "[cgroup] ERROR: CGROUP_MODE=on requires Linux." >&2
+        return 1
+    fi
+    if ! command -v systemd-run >/dev/null 2>&1; then
+        echo "[cgroup] ERROR: CGROUP_MODE=on requires systemd-run." >&2
+        return 1
+    fi
+
+    local unit_name="es-duck-duckdb-sweep-$$-$(date +%s)"
+    echo "[cgroup] Applying limits: memory.high=${limit_bytes}, memory.max=${limit_bytes}, memory.swap.max=0"
+
+    # Probe cgroup scope creation with a no-op
+    if ! systemd-run --user --scope --quiet --collect \
+        --unit "${unit_name}-probe" \
+        --property "MemoryAccounting=yes" \
+        --property "MemoryHigh=${limit_bytes}" \
+        --property "MemoryMax=${limit_bytes}" \
+        --property "MemorySwapMax=0" \
+        -- true 2>/dev/null; then
+        echo "[cgroup] ERROR: failed to create cgroup scope (setup error)." >&2
+        return 1
+    fi
+
+    # Run the actual command
+    systemd-run --user --scope --quiet --collect \
+        --unit "${unit_name}" \
+        --property "MemoryAccounting=yes" \
+        --property "MemoryHigh=${limit_bytes}" \
+        --property "MemoryMax=${limit_bytes}" \
+        --property "MemorySwapMax=0" \
+        -- "$@"
+}
 
 upload_log_file() {
     local log_file="$1"
@@ -52,6 +132,7 @@ echo "Database: $DB_FILE"
 echo "Table: $TABLE"
 echo "Threads: $THREADS"
 echo "Memory limits: $MEMORY_LIMITS"
+echo "Cgroup mode: $CGROUP_MODE"
 echo "Timeout: ${TIMEOUT_SECONDS}s"
 echo "Benchmark runs per config: $BENCHMARK_RUNS"
 echo "Log directory: $LOG_DIR"
@@ -116,7 +197,7 @@ for MEM in $MEMORY_LIMITS; do
     echo ""
 
     # Run with timeout and show output in real-time using tee
-    # Note: DuckDB will auto-detect memory from cgroup and use 80% of it
+    # Note: When CGROUP_MODE=on, DuckDB will auto-detect memory from cgroup and use 80% of it
     set +e
     if [ -n "$OUTPUT" ]; then
         # Parquet mode: truncate output file first in case it's open
@@ -126,19 +207,21 @@ for MEM in $MEMORY_LIMITS; do
             sync
         fi
 
-        timeout $TIMEOUT_SECONDS cargo run --release --bin sort-duckdb --features db-duckdb -- \
-            --db "$DB_FILE" \
-            --table "$TABLE" \
-            --temp-dir "$TEMP_DIR" \
-            --threads "$THREADS" \
-            --output "$OUTPUT" 2>&1 | tee "$TEMP_OUTPUT"
+        run_with_cgroup_limits "$MEM" \
+            timeout $TIMEOUT_SECONDS cargo run --release --bin sort-duckdb --features db-duckdb -- \
+                --db "$DB_FILE" \
+                --table "$TABLE" \
+                --temp-dir "$TEMP_DIR" \
+                --threads "$THREADS" \
+                --output "$OUTPUT" 2>&1 | tee "$TEMP_OUTPUT"
     else
         # Count mode
-        timeout $TIMEOUT_SECONDS cargo run --release --bin sort-duckdb --features db-duckdb -- \
-            --db "$DB_FILE" \
-            --table "$TABLE" \
-            --temp-dir "$TEMP_DIR" \
-            --threads "$THREADS" 2>&1 | tee "$TEMP_OUTPUT"
+        run_with_cgroup_limits "$MEM" \
+            timeout $TIMEOUT_SECONDS cargo run --release --bin sort-duckdb --features db-duckdb -- \
+                --db "$DB_FILE" \
+                --table "$TABLE" \
+                --temp-dir "$TEMP_DIR" \
+                --threads "$THREADS" 2>&1 | tee "$TEMP_OUTPUT"
     fi
 
     EXIT_CODE=${PIPESTATUS[0]}

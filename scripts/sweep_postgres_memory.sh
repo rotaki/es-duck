@@ -22,6 +22,86 @@ CLEAR_CACHE_SCRIPT="/usr/local/sbin/clearcache3.sh"
 TEMP_TABLESPACE="${TEMP_TABLESPACE:-}"  # Optional temp tablespace for spilling
 OUTPUT="${OUTPUT:-}"  # Optional output path for binary mode
 RCLONE_REMOTE="${RCLONE_REMOTE:-}"
+CGROUP_MODE="${CGROUP_MODE:-on}"  # on | off
+
+# ── Helper Functions ──────────────────────────────────────────────────────────
+
+parse_memory_to_bytes() {
+    local raw="${1//[[:space:]]/}"
+    local mem="${raw^^}"
+    local value
+
+    # Accepts GiB/MiB/KiB (binary units), or shorthand G/M/K.
+    if [[ "$mem" =~ ^([0-9]+([.][0-9]+)?)(GIB|G)$ ]]; then
+        value="${BASH_REMATCH[1]}"
+        awk -v v="$value" 'BEGIN { printf "%.0f\n", v * 1024 * 1024 * 1024 }'
+    elif [[ "$mem" =~ ^([0-9]+([.][0-9]+)?)(MIB|M)$ ]]; then
+        value="${BASH_REMATCH[1]}"
+        awk -v v="$value" 'BEGIN { printf "%.0f\n", v * 1024 * 1024 }'
+    elif [[ "$mem" =~ ^([0-9]+([.][0-9]+)?)(KIB|K)$ ]]; then
+        value="${BASH_REMATCH[1]}"
+        awk -v v="$value" 'BEGIN { printf "%.0f\n", v * 1024 }'
+    elif [[ "$mem" =~ ^([0-9]+([.][0-9]+)?)B?$ ]]; then
+        value="${BASH_REMATCH[1]}"
+        awk -v v="$value" 'BEGIN { printf "%.0f\n", v }'
+    else
+        return 1
+    fi
+}
+
+run_with_cgroup_limits() {
+    local memory_limit="$1"
+    shift
+
+    if [[ "$CGROUP_MODE" == "off" ]]; then
+        "$@"
+        return $?
+    fi
+
+    if [[ "$CGROUP_MODE" != "on" ]]; then
+        echo "[cgroup] ERROR: invalid CGROUP_MODE='$CGROUP_MODE' (expected on|off)." >&2
+        return 1
+    fi
+
+    local limit_bytes
+    if ! limit_bytes=$(parse_memory_to_bytes "$memory_limit"); then
+        echo "[cgroup] ERROR: cannot parse memory limit '$memory_limit'." >&2
+        return 1
+    fi
+
+    if [[ "$(uname -s)" != "Linux" ]]; then
+        echo "[cgroup] ERROR: CGROUP_MODE=on requires Linux." >&2
+        return 1
+    fi
+    if ! command -v systemd-run >/dev/null 2>&1; then
+        echo "[cgroup] ERROR: CGROUP_MODE=on requires systemd-run." >&2
+        return 1
+    fi
+
+    local unit_name="es-duck-postgres-sweep-$$-$(date +%s)"
+    echo "[cgroup] Applying limits: memory.high=${limit_bytes}, memory.max=${limit_bytes}, memory.swap.max=0"
+
+    # Probe cgroup scope creation with a no-op
+    if ! systemd-run --user --scope --quiet --collect \
+        --unit "${unit_name}-probe" \
+        --property "MemoryAccounting=yes" \
+        --property "MemoryHigh=${limit_bytes}" \
+        --property "MemoryMax=${limit_bytes}" \
+        --property "MemorySwapMax=0" \
+        -- true 2>/dev/null; then
+        echo "[cgroup] ERROR: failed to create cgroup scope (setup error)." >&2
+        return 1
+    fi
+
+    # Run the actual command
+    systemd-run --user --scope --quiet --collect \
+        --unit "${unit_name}" \
+        --property "MemoryAccounting=yes" \
+        --property "MemoryHigh=${limit_bytes}" \
+        --property "MemoryMax=${limit_bytes}" \
+        --property "MemorySwapMax=0" \
+        -- "$@"
+}
 
 upload_log_file() {
     local log_file="$1"
@@ -52,6 +132,7 @@ echo "Database: $DB_CONNECTION"
 echo "Table: $TABLE"
 echo "Parallel workers: $PARALLEL_WORKERS (Total processes: $((PARALLEL_WORKERS + 1)))"
 echo "Memory limits: $MEMORY_LIMITS"
+echo "Cgroup mode: $CGROUP_MODE"
 echo "Timeout: ${TIMEOUT_SECONDS}s"
 echo "Benchmark runs per config: $BENCHMARK_RUNS"
 echo "Log directory: $LOG_DIR"
@@ -124,6 +205,7 @@ for MEM in $MEMORY_LIMITS; do
     echo ""
 
     # Run with timeout and show output in real-time using tee
+    # Note: When CGROUP_MODE=on, applies OS-level memory limits to the client process
     set +e
     if [ -n "$OUTPUT" ]; then
         # Binary output mode: truncate output file first in case it exists
@@ -134,36 +216,40 @@ for MEM in $MEMORY_LIMITS; do
         fi
 
         if [ -n "$TEMP_TABLESPACE" ]; then
-            timeout $TIMEOUT_SECONDS cargo run --release --bin sort-postgres --features db-postgres -- \
-                --db "$DB_CONNECTION" \
-                --table "$TABLE" \
-                --total-memory "$MEM" \
-                --parallel-workers "$PARALLEL_WORKERS" \
-                --temp-tablespace "$TEMP_TABLESPACE" \
-                --output "$OUTPUT" 2>&1 | tee "$TEMP_OUTPUT"
+            run_with_cgroup_limits "$MEM" \
+                timeout $TIMEOUT_SECONDS cargo run --release --bin sort-postgres --features db-postgres -- \
+                    --db "$DB_CONNECTION" \
+                    --table "$TABLE" \
+                    --total-memory "$MEM" \
+                    --parallel-workers "$PARALLEL_WORKERS" \
+                    --temp-tablespace "$TEMP_TABLESPACE" \
+                    --output "$OUTPUT" 2>&1 | tee "$TEMP_OUTPUT"
         else
-            timeout $TIMEOUT_SECONDS cargo run --release --bin sort-postgres --features db-postgres -- \
-                --db "$DB_CONNECTION" \
-                --table "$TABLE" \
-                --total-memory "$MEM" \
-                --parallel-workers "$PARALLEL_WORKERS" \
-                --output "$OUTPUT" 2>&1 | tee "$TEMP_OUTPUT"
+            run_with_cgroup_limits "$MEM" \
+                timeout $TIMEOUT_SECONDS cargo run --release --bin sort-postgres --features db-postgres -- \
+                    --db "$DB_CONNECTION" \
+                    --table "$TABLE" \
+                    --total-memory "$MEM" \
+                    --parallel-workers "$PARALLEL_WORKERS" \
+                    --output "$OUTPUT" 2>&1 | tee "$TEMP_OUTPUT"
         fi
     else
         # Count mode
         if [ -n "$TEMP_TABLESPACE" ]; then
-            timeout $TIMEOUT_SECONDS cargo run --release --bin sort-postgres --features db-postgres -- \
-                --db "$DB_CONNECTION" \
-                --table "$TABLE" \
-                --total-memory "$MEM" \
-                --parallel-workers "$PARALLEL_WORKERS" \
-                --temp-tablespace "$TEMP_TABLESPACE" 2>&1 | tee "$TEMP_OUTPUT"
+            run_with_cgroup_limits "$MEM" \
+                timeout $TIMEOUT_SECONDS cargo run --release --bin sort-postgres --features db-postgres -- \
+                    --db "$DB_CONNECTION" \
+                    --table "$TABLE" \
+                    --total-memory "$MEM" \
+                    --parallel-workers "$PARALLEL_WORKERS" \
+                    --temp-tablespace "$TEMP_TABLESPACE" 2>&1 | tee "$TEMP_OUTPUT"
         else
-            timeout $TIMEOUT_SECONDS cargo run --release --bin sort-postgres --features db-postgres -- \
-                --db "$DB_CONNECTION" \
-                --table "$TABLE" \
-                --total-memory "$MEM" \
-                --parallel-workers "$PARALLEL_WORKERS" 2>&1 | tee "$TEMP_OUTPUT"
+            run_with_cgroup_limits "$MEM" \
+                timeout $TIMEOUT_SECONDS cargo run --release --bin sort-postgres --features db-postgres -- \
+                    --db "$DB_CONNECTION" \
+                    --table "$TABLE" \
+                    --total-memory "$MEM" \
+                    --parallel-workers "$PARALLEL_WORKERS" 2>&1 | tee "$TEMP_OUTPUT"
         fi
     fi
 
