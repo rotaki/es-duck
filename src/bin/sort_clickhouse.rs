@@ -81,9 +81,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
     if let Some(ref memory_limit) = args.memory_limit {
         let cgroup_bytes = parse_memory_to_bytes(memory_limit)?;
-        let max_bytes = cgroup_bytes / 2;
+        let max_bytes = (cgroup_bytes as f64 * 0.6) as u64;
         println!("Parsed cgroup memory limit: {} bytes", cgroup_bytes);
-        println!("Setting max_bytes_before_external_sort to 50% = {} bytes", max_bytes);
+        println!("Setting max_bytes_before_external_sort to 60% = {} bytes", max_bytes);
         settings.push(format!("max_bytes_before_external_sort = {}", max_bytes));
         settings.push(format!("max_bytes_ratio_before_external_sort = 0"));
     } else {
