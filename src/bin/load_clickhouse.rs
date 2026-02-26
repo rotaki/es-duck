@@ -42,6 +42,10 @@ struct Args {
     /// Number of records to batch before sending (higher = more memory, less overhead)
     #[arg(long, default_value_t = 100_000)]
     batch_size: usize,
+
+    /// Disable column compression (store data uncompressed with CODEC(NONE))
+    #[arg(long, default_value_t = false)]
+    no_compression: bool,
 }
 
 #[tokio::main]
@@ -55,17 +59,26 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     // Create table (unsorted for benchmarking)
     println!("Creating table if not exists...");
-    client
-        .query(&format!(
+    let create_sql = if args.no_compression {
+        format!(
+            "CREATE TABLE IF NOT EXISTS {} (
+                sort_key String CODEC(NONE),
+                payload String CODEC(NONE)
+            ) ENGINE = MergeTree()
+            ORDER BY tuple()",
+            args.table
+        )
+    } else {
+        format!(
             "CREATE TABLE IF NOT EXISTS {} (
                 sort_key String,
                 payload String
             ) ENGINE = MergeTree()
             ORDER BY tuple()",
             args.table
-        ))
-        .execute()
-        .await?;
+        )
+    };
+    client.query(&create_sql).execute().await?;
 
     println!(
         "Starting load from {:?} with {} threads (batch_size={})...",

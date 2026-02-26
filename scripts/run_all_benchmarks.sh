@@ -44,7 +44,7 @@ MEMORY_LIMIT="${MEMORY_LIMIT:-$(echo $MEMORY_LIMITS | awk '{print $1}')}"
 
 SSD_BASE="${SSD_BASE:-/mnt/nvme1/rotaki/es-duck/scripts}"
 HDD_BASE="${HDD_BASE:-/tank/local/riki/datasets}"
-DATABASES="${DATABASES:-duckdb postgres clickhouse}"
+DATABASES="${DATABASES:-duckdb postgres clickhouse clickhouse-nocompression}"
 RCLONE_REMOTE="${RCLONE_REMOTE:-gdrive:bench_results/gensort}"
 HOST_TAG="${HOST_TAG:-$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo unknown-host)}"
 DATASET_NAME="${DATASET_NAME:-${FORMAT}}"
@@ -375,6 +375,9 @@ preflight_checks() {
             clickhouse)
                 require_file "${SCRIPT_DIR}/sweep_clickhouse_memory.sh" "ClickHouse memory sweep runner"
                 ;;
+            clickhouse-nocompression)
+                require_file "${SCRIPT_DIR}/sweep_clickhouse_memory.sh" "ClickHouse (no-compression) memory sweep runner"
+                ;;
             *)
                 add_preflight_missing "unknown database in DATABASES: '$db'"
                 ;;
@@ -416,6 +419,9 @@ dataset_db_path() {
             ;;
         clickhouse)
             echo "${base}/clickhouse-data_${DATASET_NAME_SAFE}"
+            ;;
+        clickhouse-nocompression)
+            echo "${base}/clickhouse-nocompression-data_${DATASET_NAME_SAFE}"
             ;;
         *)
             echo "ERROR: Unknown database type for path resolution: $db_type" >&2
@@ -597,7 +603,7 @@ stop_other_dbs() {
     if [[ "$current_db" != "postgres" ]]; then
         stop_postgres
     fi
-    if [[ "$current_db" != "clickhouse" ]]; then
+    if [[ "$current_db" != "clickhouse" ]] && [[ "$current_db" != "clickhouse-nocompression" ]]; then
         stop_clickhouse
     fi
 }
@@ -776,6 +782,22 @@ prepare_data_on_ssd() {
                 --threads 14
             sync
             echo "[data] ClickHouse data created."
+            ;;
+        clickhouse-nocompression)
+            # Start clickhouse first, then load with no compression
+            start_clickhouse "$ssd_path"
+            echo "[data] Loading data into ClickHouse (no compression)..."
+            cd "$PROJECT_DIR"
+            cargo run --release --bin load-clickhouse --features db-clickhouse -- \
+                --format "$FORMAT" \
+                --input "$INPUT_FILE" \
+                --url "http://localhost:${HTTP_PORT}" \
+                --database default \
+                --table "$TABLE" \
+                --threads 14 \
+                --no-compression
+            sync
+            echo "[data] ClickHouse (no compression) data created."
             ;;
     esac
 }
@@ -1025,6 +1047,7 @@ run_clickhouse_benchmark() {
     echo "========================================================"
 
     stop_other_dbs "clickhouse"
+    stop_clickhouse  # Ensure any running ClickHouse (possibly with a different data dir) is stopped
     check_ssd_space
     prepare_data_on_ssd "clickhouse"
 
@@ -1060,6 +1083,51 @@ run_clickhouse_benchmark() {
     move_data_to_hdd "clickhouse"
 }
 
+# ── ClickHouse (No Compression) Benchmark ────────────────────────────────────
+run_clickhouse_nocompression_benchmark() {
+    local clickhouse_ssd_dir
+    clickhouse_ssd_dir=$(dataset_db_path "$SSD_BASE" "clickhouse-nocompression")
+
+    echo ""
+    echo "========================================================"
+    echo "  ClickHouse (No Compression) Memory Sweep"
+    echo "========================================================"
+
+    stop_other_dbs "clickhouse-nocompression"
+    stop_clickhouse  # Ensure any running ClickHouse (possibly with a different data dir) is stopped
+    check_ssd_space
+    prepare_data_on_ssd "clickhouse-nocompression"
+
+    # Ensure server is started with SSD data dir
+    start_clickhouse "$clickhouse_ssd_dir"
+
+    clear_system_caches
+    echo "[clickhouse-nocompression] Running sweep..."
+    cd "$PROJECT_DIR"
+    env MEMORY_LIMITS="$MEMORY_LIMITS" \
+        THREADS="$THREADS" \
+        BENCHMARK_RUNS="$BENCHMARK_RUNS" \
+        CLICKHOUSE_URL="http://localhost:${HTTP_PORT}" \
+        DATABASE="default" \
+        TABLE="$TABLE" \
+        FORMAT="$FORMAT" \
+        INPUT_FILE="$INPUT_FILE" \
+        TIMEOUT_SECONDS="$TIMEOUT_SECONDS" \
+        RCLONE_REMOTE="$RCLONE_REMOTE" \
+        CGROUP_MODE="$CGROUP_MODE" \
+        LOG_DIR="./logs/clickhouse_nocompression_memory_sweep_${SWEEP_TIMESTAMP}" \
+        bash "${SCRIPT_DIR}/sweep_clickhouse_memory.sh"
+
+    local clickhouse_log_dir
+    clickhouse_log_dir=$(ls -dt ./logs/clickhouse_nocompression_memory_sweep_* 2>/dev/null | head -1)
+    if [[ -n "$clickhouse_log_dir" ]]; then
+        upload_logs "$clickhouse_log_dir"
+    fi
+
+    stop_clickhouse
+    move_data_to_hdd "clickhouse-nocompression"
+}
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 preflight_checks
@@ -1072,8 +1140,9 @@ fi
 # Install database binaries upfront (no-op if already present)
 for DB in $DATABASES; do
     case "$DB" in
-        postgres)   install_postgres ;;
-        clickhouse) install_clickhouse ;;
+        postgres)                install_postgres ;;
+        clickhouse)              install_clickhouse ;;
+        clickhouse-nocompression) install_clickhouse ;;
     esac
 done
 
@@ -1087,6 +1156,9 @@ for DB in $DATABASES; do
             ;;
         clickhouse)
             run_clickhouse_benchmark
+            ;;
+        clickhouse-nocompression)
+            run_clickhouse_nocompression_benchmark
             ;;
         *)
             echo "ERROR: Unknown database: $DB"
